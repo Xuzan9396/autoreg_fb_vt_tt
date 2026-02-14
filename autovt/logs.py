@@ -24,9 +24,29 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _resolve_airtest_debug() -> bool:
-    # 环境变量优先，便于临时打开/关闭 debug：
+    # 打包运行永久关闭 Airtest/Poco debug（忽略环境变量），避免线上包出现大量第三方噪音日志。
+    executable_text = str(Path(sys.executable))  # 读取当前解释器或可执行文件路径。
+    argv0_text = str(Path(sys.argv[0])) if sys.argv else ""  # 读取 argv[0]，兼容部分子进程场景。
+    # 只要路径包含 .app/Contents/，就视为 macOS bundle 内运行（含 MacOS 与 Frameworks 子路径）。
+    running_in_macos_bundle = ".app/Contents/" in executable_text or ".app/Contents/" in argv0_text
+    # Windows 打包通常是 .exe；排除 python.exe/pythonw.exe，避免误伤源码调试。
+    executable_name = Path(executable_text).name.lower()
+    argv0_name = Path(argv0_text).name.lower()
+    running_in_windows_exe = (
+        (executable_text.lower().endswith(".exe") and "python" not in executable_name)
+        or (argv0_text.lower().endswith(".exe") and "python" not in argv0_name)
+    )
+    if running_in_macos_bundle or running_in_windows_exe or bool(getattr(sys, "frozen", False)):
+        return False
+
+    # 源码运行时：环境变量优先，便于临时打开/关闭 debug：
     # AUTOVT_AIRTEST_DEBUG=1 python main.py
-    return _env_bool("AUTOVT_AIRTEST_DEBUG", ENABLE_AIRTEST_DEBUG)
+    env_value = os.getenv("AUTOVT_AIRTEST_DEBUG")
+    if env_value is not None:  # 显式设置时按环境变量走。
+        return _env_bool("AUTOVT_AIRTEST_DEBUG", ENABLE_AIRTEST_DEBUG)
+
+    # 源码模式按 settings 默认值执行。
+    return ENABLE_AIRTEST_DEBUG
 
 
 def _resolve_log_level() -> str:

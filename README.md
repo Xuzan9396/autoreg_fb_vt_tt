@@ -1,4 +1,7 @@
 # autovt
+
+git tag -a v0.0.1 -m "修改" &&  git push origin v0.0.1
+
 https://www.fakenamegenerator.com/gen-random-us-fr.php
 名字生成器
 Airtest 安卓自动化多设备项目（多进程主控版）。

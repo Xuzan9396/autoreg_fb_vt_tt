@@ -1,4 +1,5 @@
 import argparse  # 导入参数解析库，用于支持 GUI/CLI 模式切换。
+import multiprocessing as mp  # 导入多进程模块，用于 frozen 场景下正确接管子进程启动。
 
 from autovt.cli import run_console  # 导入命令行主循环函数，作为可选回退模式。
 from autovt.gui import run_gui  # 导入 GUI 启动函数，作为默认入口模式。
@@ -26,6 +27,7 @@ def parse_args() -> argparse.Namespace:  # 解析主入口参数。
 
 
 def main() -> None:  # 主函数：根据模式分发到 GUI 或 CLI。
+    mp.freeze_support()  # 兼容打包后的多进程子进程入口，避免子进程误进入 GUI 主流程导致重复窗口。
     args = parse_args()  # 解析启动参数。
     setup_logging(process_role="manager")  # 初始化主进程日志配置。
     log.info("主入口启动", mode=args.mode, interval=args.interval)  # 记录启动参数日志。

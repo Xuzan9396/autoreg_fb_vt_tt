@@ -5,9 +5,9 @@
 ## 1. 先做环境检查
 
 ```bash
-cd /Users/admin/go/src/go_cookies/autovt
+cd /Users/admin/go/src/autovt
 uv sync
-uv run flet doctor
+uvx --from flet==0.80.5 flet doctor
 ```
 
 ## 1.1 你这次报错的根因（exit code 72）
@@ -44,57 +44,67 @@ xcodebuild -version
 ## 1.2 macOS 打包一条龙（可直接复制）
 
 ```bash
-cd /Users/admin/go/src/go_cookies/autovt
+cd /Users/admin/go/src/autovt
 uv sync
-uv run flet doctor
-uv run flet build macos . \
-  --project autovt \
-  --product "AutoVT" \
-  --org com.autovt \
-  --bundle-id com.autovt.app \
-  --arch arm64 \
-  --output build/macos-release \
+uvx --from flet==0.80.5 flet doctor
+uv flet pack main.py \
+  -n AutoVT \
+  -i assets/icon.icns \
+  --add-data "assets:assets" \
+  --add-data "images:images" \
+  --add-data "adb:adb" \
   --yes -v
 ```
 
+## 1.3 `uvx` 和 `uv run` 的区别（你这次遇到的点）
+
+1. `uvx --from flet==0.80.5 flet ...`：
+   - 每次临时准备可执行的 `flet` CLI，最稳，不依赖当前 `.venv` 里是否已有 CLI。
+2. `uv run flet ...`：
+   - 依赖当前项目环境里已经有可执行 `flet`，否则会报 `Failed to spawn: flet`。
+3. 如果你想坚持用 `uv run`，建议写成：
+
+```bash
+uv run --with flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes -v
+```
+
+结论：CI 和本地都建议优先 `uvx --from flet==0.80.5`，可重复性更好。
+
 说明：
 
-1. `.`：明确使用当前目录作为应用路径。
-2. `--arch arm64`：Apple Silicon 机器建议先打单架构，速度更快。
-3. `--yes`：自动确认下载/安装提示（比如首次下载 Flutter SDK）。
-4. `--output`：统一输出到固定目录，方便你找包。
+1. `--add-data "assets:assets"`：把运行时图标与静态资源一并打进包。
+2. `--add-data "images:images"`：把业务模板图资源一并打进包。
+3. `--add-data "adb:adb"`：把内置 adb 一并打进包，避免 Finder 启动时 PATH 丢失问题。
+4. `--yes`：自动确认覆盖提示，适合 CI。
 
 产物一般在：
 
-1. `build/macos-release/`（你指定的输出目录）
-2. 或默认 `build/macos/`（没传 `--output` 时）
+1. `dist/AutoVT.app`
+2. `build/`（PyInstaller 临时构建目录，可忽略）
 
 ## 2. 两种打包方式怎么选
 
-1. `flet pack`：桌面快速打包（底层 PyInstaller），适合先出可执行文件验证。
-2. `flet build`：官方跨平台构建（macOS / Windows / Linux / Android / iOS / Web），适合正式发布。
-
-官方建议也优先使用 `flet build`（可定制项更多，发布更标准）：
-- https://flet.dev/docs/cookbook/packaging-desktop-app/
+1. `flet pack`：桌面打包（底层 PyInstaller），当前项目推荐主线，稳定性更高。
+2. `flet build`：Flutter 原生构建，功能更多，但你当前项目在多进程场景下问题更多，先不作为主线。
 
 ## 3. 快速桌面打包（推荐先用这个）
 
 ### macOS
 
 ```bash
-uv run flet pack main.py -n AutoVT -i assets/icon.icns --yes
+uvx --from flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes
 ```
 
 ### Windows
 
 ```bash
-uv run flet pack main.py -n AutoVT -i assets/icon.ico --yes
+uvx --from flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.ico --yes
 ```
 
 ### Linux
 
 ```bash
-uv run flet pack main.py -n AutoVT -i assets/icon.png --yes
+uvx --from flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.png --yes
 ```
 
 打包产物默认在 `dist/` 目录。
@@ -104,12 +114,12 @@ uv run flet pack main.py -n AutoVT -i assets/icon.png --yes
 - 像 `build/AutoVT/AutoVT.pkg` 这种文件并不是 macOS 安装包（不能双击安装），它是内部压缩产物。
 - 真正可运行的是 `dist/AutoVT.app`。
 
-## 4. 正式构建（flet build）
+## 4. 可选：flet build（备用方案）
 
 ### macOS 示例
 
 ```bash
-uv run flet build macos . \
+uvx --from flet==0.80.5 flet build macos . \
   --project autovt \
   --product "AutoVT" \
   --org com.autovt \
@@ -122,7 +132,7 @@ uv run flet build macos . \
 ### Windows 示例
 
 ```bash
-uv run flet build windows . \
+uvx --from flet==0.80.5 flet build windows . \
   --project autovt \
   --product "AutoVT 管理后台" \
   --org com.autovt \
@@ -132,7 +142,7 @@ uv run flet build windows . \
 ### Android APK 示例
 
 ```bash
-uv run flet build apk . \
+uvx --from flet==0.80.5 flet build apk . \
   --project autovt \
   --product "AutoVT 管理后台" \
   --org com.autovt \
@@ -199,10 +209,10 @@ company = "AutoVT"
 path = "."
 ```
 
-之后命令可以简化为：
+之后命令可以简化为（如果你走 `flet build` 备用方案）：
 
 ```bash
-uv run flet build macos . --yes
+uvx --from flet==0.80.5 flet build macos . --yes
 ```
 
 ## 8. 你当前遇到的问题（对应修复）
@@ -222,7 +232,7 @@ uv run flet build macos . --yes
 先准备一张 `1024x1024` PNG：`assets/icon.png`，再生成完整 `icon.icns`：
 
 ```bash
-cd /Users/admin/go/src/go_cookies/autovt
+cd /Users/admin/go/src/autovt
 mkdir -p /tmp/autovt.iconset
 sips -z 16 16     assets/icon.png --out /tmp/autovt.iconset/icon_16x16.png
 sips -z 32 32     assets/icon.png --out /tmp/autovt.iconset/icon_16x16@2x.png
@@ -240,7 +250,7 @@ iconutil -c icns /tmp/autovt.iconset -o assets/icon.icns
 然后重新打包：
 
 ```bash
-uv run flet pack main.py -n AutoVT -i assets/icon.icns --yes
+uvx --from flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes
 ```
 
 最后刷新 Dock 缓存（可选）：
@@ -259,7 +269,142 @@ killall Dock
 
 1. 打包后不是我想要的名称：优先检查 `--product` / `-n` 是否传入。
 2. 图标没生效：检查格式是否匹配平台（mac=`.icns`，win=`.ico`，linux=`.png`）。
-3. `flet build` 失败：先执行 `uv run flet doctor`，再按提示补齐 Flutter / Xcode / Android SDK。
-4. `Generated app icons ✅` 后失败：图标已生成不代表构建完成，继续看后续日志里真实失败点（你这次就是 Xcode 缺失）。
+3. `flet pack` 失败：先执行 `uvx --from flet==0.80.5 flet doctor`，再检查 `--add-data` 路径是否存在。
+4. `Generated app icons ✅` 后失败：图标生成成功不代表构建完成，继续看后续真实失败点。
 5. `10 packages have newer versions...`：这是依赖提示，不是本次失败原因，可先忽略。
 6. `CocoaPods out of date`：通常是警告，不一定阻塞 macOS 构建；先把 `xcodebuild` 问题修好再处理。
+7. `flutter/dart not on PATH`：对 `flet pack` 一般不是阻塞项。
+8. Android `cmdline-tools` / `android-licenses`：做 macOS 桌面打包时可忽略。
+
+### 9.1 打包后出现 2 个窗口（一个空白，一个正常）
+
+现象：
+
+1. 启动 `.app` 后会出现一个正常主窗口。
+2. 同时出现一个空白窗口（标题常为 `AutoVT`）。
+
+根因（多进程 + 打包场景）：
+
+1. 项目 worker 进程使用 `multiprocessing` 的 `spawn`。
+2. 打包为 `.app` 后，子进程启动时如果没有 `freeze_support()`，可能再次执行主入口。
+3. 子进程误走 GUI 启动路径，会额外拉起空白窗口。
+
+当前仓库修复：
+
+1. `main.py` 已在 `main()` 开头加入 `mp.freeze_support()`。
+2. 重新打包后，子进程会正确进入多进程分支，不再重复创建 GUI 窗口。
+
+验证建议：
+
+```bash
+uvx --from flet==0.80.5 flet pack main.py \
+  -n AutoVT \
+  -i assets/icon.icns \
+  --add-data "assets:assets" \
+  --add-data "images:images" \
+  --add-data "adb:adb" \
+  --yes -v
+```
+
+### 9.2 打包后提示“未找到 adb 命令”
+
+现象：
+
+1. `uv run python main.py` 正常。
+2. 双击 `.app` 后提示 `未找到 adb 命令`。
+
+根因：
+
+1. 终端启动会加载你的 shell 环境（`PATH`、`ANDROID_HOME` 等）。
+2. Finder 启动 `.app` 不会完整加载这些变量，导致 `adb` 命令名无法解析。
+
+当前仓库修复（跨平台）：
+
+1. `autovt/adb.py` 新增自动解析逻辑：
+   - 优先读取 `AUTOVT_ADB_BIN`。
+   - 默认优先尝试项目内置 `adb/mac/platform-tools/adb`（mac）和 `adb/windows/platform-tools/adb.exe`（windows）。
+   - 自动尝试 `ANDROID_SDK_ROOT/ANDROID_HOME`。
+   - 按平台尝试常见默认路径（macOS / Windows / Linux）。
+   - 最后兜底 Airtest 内置 adb。
+2. `autovt/runtime.py` 在设备初始化前会先执行 adb 环境初始化，保证 worker 进程也可用。
+
+手工覆盖（推荐）：
+
+- macOS:
+
+```bash
+export AUTOVT_ADB_BIN="/Users/admin/Library/Android/sdk/platform-tools/adb"
+```
+
+- Windows（PowerShell）:
+
+```powershell
+$env:AUTOVT_ADB_BIN="C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+```
+
+说明：
+
+1. 只要设置 `AUTOVT_ADB_BIN`，应用会优先使用该路径。
+2. Windows 后续也可直接复用这套机制，不需要改代码。
+
+### 9.3 打包后出现双窗口（主窗口 + 空白窗口）
+
+现象：
+
+1. 启动后有一个正常主窗口。
+2. 同时多出一个标题为 `AutoVT` 的空白窗口。
+
+根因：
+
+1. 打包运行时如果未进入 Flet embedded 模式，可能同时出现宿主窗口和额外自启窗口。
+
+当前仓库修复：
+
+1. `autovt/gui/app.py` 在 `run_gui()` 里会自动识别打包态（macOS `.app` / Windows `.exe`）。
+2. 识别到打包态后自动设置 `FLET_PLATFORM`，避免双窗口。
+3. `autovt/multiproc/manager.py` 对子进程启动增加了“秒退探针”，若子进程立即退出会直接回显 `exit_code`，方便定位。
+
+注意：
+
+1. 该逻辑只在打包态生效，不影响你本地 `uv run python main.py` 调试。
+
+### 9.4 打包后如何关闭 Airtest Debug、日志在哪里
+
+1. 打包运行（`.app` / `.exe`）：
+   - Airtest/Poco debug 日志永久关闭（仅保留 warning 及以上）。
+   - `AUTOVT_AIRTEST_DEBUG` 在打包态无效，不可重新开启。
+2. 源码运行（`uv run python main.py`）：
+   - 可用 `AUTOVT_AIRTEST_DEBUG=1` 临时开启 debug（仅建议排查问题时使用）。
+3. 日志文件路径（JSONL）：
+   - macOS：`~/Library/Application Support/AutoVT/log/json/`
+   - Windows：`%APPDATA%\\AutoVT\\log\\json\\`
+4. 常见文件：
+   - `manager.jsonl`：主控进程日志
+   - `<设备序列号>.jsonl`：每台设备 worker 日志
+
+## 10. GitHub Actions（Tag 触发 mac 打包）
+
+当前仓库已新增工作流：
+
+- `.github/workflows/flet-macos-tag.yml`
+
+触发方式：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流动作：
+
+1. 使用 `macos-14` runner。
+2. 安装 `Python 3.13`。
+3. 安装 `uv` 并执行 `uv sync --frozen`。
+4. 执行 `uvx --from flet==0.80.5 flet pack main.py`（PyInstaller 路线）构建 `.app`。
+6. 打包为 `dist/AutoVT-macos-arm64-<tag>.zip` 并生成 `.sha256`。
+7. 上传到 Actions Artifacts，并自动附加到当前 tag 的 GitHub Release。
+
+补充：
+
+1. GitHub Actions 不会复用你本机 shell 环境，所以本机 `PATH` 类问题通常不会直接复现到 CI。
+2. 但“代码级问题”（例如多进程入口处理不当导致双窗口）在本机和 CI 打包产物中都可能出现，因此仍需在代码里修复。

@@ -2,9 +2,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from autovt.adb import build_device_uri
+from autovt.adb import build_device_uri, ensure_adb_environment
 from autovt.logs import apply_third_party_log_policy, get_logger
-from autovt.settings import LOG_DIR, PROJECT_ROOT
+from autovt.settings import AIRTEST_SAVE_IMAGE, LOG_DIR, POCO_SCREENSHOT_EACH_ACTION, PROJECT_ROOT
 
 log = get_logger("runtime")
 # 进程内共享的 Poco 单例（每个 worker 进程各自一份，互不影响）。
@@ -16,14 +16,21 @@ def setup_device(serial: str, script_file: str, log_subdir: str) -> None:
     在当前进程内初始化一台设备。
     多进程模式下每个子进程只调用一次，互不干扰。
     """
+    # 先确保 adb 可执行路径与环境变量可用，兼容 Finder 启动 .app 时 PATH 缺失场景。
+    resolved_adb = ensure_adb_environment()
+    log.info("设备初始化前已确认 adb 环境", adb_bin=resolved_adb)
+
     # 延迟导入：只在子进程真正初始化设备时才加载 airtest。
     # 这样主控层（只做进程管理）不会被 airtest 依赖强绑定。
     from airtest.cli.parser import cli_setup
     from airtest.core.api import auto_setup, set_current
+    from airtest.core.settings import Settings as ST
 
     # Airtest import 时会改动 logger 级别，这里导入后立即重置一次策略。
     airtest_debug = apply_third_party_log_policy()
     log.info("已应用第三方日志策略", airtest_debug=airtest_debug)
+    ST.SAVE_IMAGE = bool(AIRTEST_SAVE_IMAGE)  # 控制 Airtest 是否保存动作截图文件。
+    log.info("已应用 Airtest 截图保存策略", save_image=ST.SAVE_IMAGE)
 
     if len(sys.argv) > 1:
         # 当前脚本携带了自定义参数（例如 test.py clear_all），直接跳过 Airtest CLI 解析。
@@ -66,9 +73,13 @@ def create_poco() -> Any:
     # 创建 Poco 驱动实例，后续任务里就能进行控件级操作。
     _POCO_INSTANCE = AndroidUiautomationPoco(
         use_airtest_input=True,
-        screenshot_each_action=True,
+        screenshot_each_action=bool(POCO_SCREENSHOT_EACH_ACTION),  # 控制 Poco 每步动作后是否自动截图。
     )
-    log.info("Poco 初始化完成", poco_type=type(_POCO_INSTANCE).__name__)
+    log.info(
+        "Poco 初始化完成",
+        poco_type=type(_POCO_INSTANCE).__name__,
+        screenshot_each_action=bool(POCO_SCREENSHOT_EACH_ACTION),
+    )
     return _POCO_INSTANCE
 
 

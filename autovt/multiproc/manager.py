@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import queue
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 try:  # 尝试导入 psutil，用于实现进程级“即时暂停/恢复”。
     import psutil  # 导入 psutil，便于直接挂起/恢复 worker 进程。
@@ -17,6 +19,20 @@ from autovt.settings import WORKER_STOP_FORCE_TIMEOUT_SEC, WORKER_STOP_GRACE_TIM
 from autovt.userdb import UserDB
 
 log = get_logger("manager")
+WORKER_STARTUP_PROBE_SEC = 0.4  # 启动探针等待秒数：用于识别“启动即退出”的秒退进程。
+
+
+def _ensure_spawn_pythonpath() -> None:
+    """确保 spawn 子进程可导入 autovt 包。"""
+    app_root = Path(__file__).resolve().parents[2]  # 解析应用根目录（包含 autovt 包的上一级）。
+    app_root_text = str(app_root)  # 转成字符串，便于写入环境变量。
+    old_pythonpath = os.environ.get("PYTHONPATH", "")  # 读取当前 PYTHONPATH（可能为空）。
+    parts = [part for part in old_pythonpath.split(os.pathsep) if part.strip()]  # 拆分并清洗已有路径列表。
+    if app_root_text in parts:  # 已存在时无需重复写入。
+        return
+    new_parts = [app_root_text, *parts]  # 把应用根目录放在最前面，保证优先导入本项目代码。
+    os.environ["PYTHONPATH"] = os.pathsep.join(new_parts)  # 回写新的 PYTHONPATH，供后续 spawn 子进程继承。
+    log.info("已补齐 spawn PYTHONPATH", app_root=app_root_text)
 
 
 @dataclass
@@ -39,6 +55,8 @@ class WorkerHandle:
 
 class DeviceProcessManager:
     def __init__(self, loop_interval_sec: float) -> None:
+        _ensure_spawn_pythonpath()  # 先保证子进程 import 路径可用，避免打包态 worker 秒退。
+
         # 强制使用 spawn：多平台行为更一致，尤其是 macOS。
         self._ctx = mp.get_context("spawn")
         # 子进程自动轮询间隔。
@@ -137,8 +155,8 @@ class DeviceProcessManager:
                 event_time=float(event["time"]),
             )
 
-        # 事件清空后顺手做一次死亡进程回收。
-        self._cleanup_all_dead()
+        # 不在 drain_events 里自动删除 dead worker。
+        # 原因：GUI 需要看到“刚退出”的状态（pid/详情/exit_code），否则会回退成“未启动”误导用户。
         return events
 
     def start_worker(self, serial: str) -> str:
@@ -174,6 +192,18 @@ class DeviceProcessManager:
             last_detail=f"子进程已启动 pid={process.pid}",
             updated_at=time.time(),
         )
+        # 启动后做一次短探针：如果子进程“秒退”，直接返回失败原因，避免 GUI 误显示“已启动”。
+        process.join(WORKER_STARTUP_PROBE_SEC)
+        if not process.is_alive():
+            exit_code = process.exitcode if process.exitcode is not None else -1  # 读取退出码，便于定位秒退原因。
+            detail = f"子进程启动后立即退出 exit_code={exit_code}"  # 构造统一失败详情文案。
+            worker = self._workers.get(serial)  # 回读句柄，更新状态快照给 GUI 展示。
+            if worker:
+                worker.last_state = "fatal"  # 秒退统一标记为 fatal，方便前端颜色和文案突出显示。
+                worker.last_detail = detail  # 写入失败详情。
+                worker.updated_at = time.time()  # 更新时间戳，确保 UI 立即刷新到最新状态。
+            log.error("子进程启动探针失败", serial=serial, pid=process.pid, exit_code=exit_code)
+            return f"{serial}: 启动失败，{detail}"
         return f"{serial}: 启动成功 pid={process.pid}"
 
     def start_all(self) -> list[str]:

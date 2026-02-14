@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import os
+import platform
+import sys
+from pathlib import Path
 from typing import Callable
 
 import flet as ft
@@ -276,6 +280,30 @@ class AutoVTGuiApp:
 
 def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
     """GUI 启动函数，供主入口调用。"""
+    # 在打包产物中补齐 FLET_PLATFORM，避免出现“宿主窗口 + 额外空白窗口”双开现象。
+    # 说明：flet 通过该变量判断是否 embedded 运行；源码模式下不应强制设置。
+    if not os.environ.get("FLET_PLATFORM"):
+        # flet pack（PyInstaller）场景通常由 flet 内部自行处理平台模式。
+        # 若这里强制覆写，可能出现“窗口空白/无法正常显示”的问题。
+        if getattr(sys, "_MEIPASS", None):
+            log.info("检测到 PyInstaller 打包运行，跳过 FLET_PLATFORM 强制设置")
+        else:
+            exe_path = Path(sys.executable)  # 读取当前解释器/可执行文件路径，用于判断运行形态。
+            exe_text = str(exe_path)  # 转字符串便于做路径片段判断。
+            system_name = platform.system().lower()  # 读取当前系统名（darwin/windows/linux）。
+
+            # macOS 打包 app：典型路径包含 ".app/Contents/MacOS/"。
+            is_macos_bundle = system_name == "darwin" and ".app/Contents/MacOS/" in exe_text
+            # Windows 打包 exe：扩展名为 .exe 且文件名不包含 python。
+            is_windows_bundle = system_name.startswith("win") and exe_path.suffix.lower() == ".exe" and "python" not in exe_path.name.lower()
+
+            if is_macos_bundle:
+                os.environ["FLET_PLATFORM"] = "macos"  # 标记为 embedded macOS 运行模式。
+                log.info("检测到 macOS 打包运行，已设置 FLET_PLATFORM", value=os.environ["FLET_PLATFORM"])
+            elif is_windows_bundle:
+                os.environ["FLET_PLATFORM"] = "windows"  # 标记为 embedded Windows 运行模式。
+                log.info("检测到 Windows 打包运行，已设置 FLET_PLATFORM", value=os.environ["FLET_PLATFORM"])
+
     def _main(page: ft.Page) -> None:
         app = AutoVTGuiApp(page=page, loop_interval_sec=loop_interval_sec)
         app.start()

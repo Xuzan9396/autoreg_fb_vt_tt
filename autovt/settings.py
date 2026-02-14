@@ -1,13 +1,47 @@
+import os
+import platform
 from pathlib import Path
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-# 日志目录
-LOG_DIR = PROJECT_ROOT / "log"
-# JSON 日志目录
-JSON_LOG_DIR = LOG_DIR / "json"
 # 图片资源根目录
 IMAGES_DIR = PROJECT_ROOT / "images"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """读取布尔环境变量：支持 1/true/yes/on。"""
+    raw_value = os.getenv(name)  # 读取环境变量原始字符串。
+    if raw_value is None:  # 环境变量不存在时返回默认值。
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}  # 统一按真值集合解析。
+
+
+def _resolve_runtime_data_dir() -> Path:
+    """解析运行期数据目录（日志等），确保打包后也有稳定可写路径。"""
+    system_name = platform.system().lower()  # 读取当前系统名称，便于分平台处理目录规则。
+    if system_name == "darwin":  # macOS：统一放到用户 Application Support。
+        return Path.home() / "Library" / "Application Support" / "AutoVT"
+    if system_name.startswith("win"):  # Windows：优先用 APPDATA，兜底 LOCALAPPDATA。
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            return Path(appdata) / "AutoVT"
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            return Path(local_appdata) / "AutoVT"
+        return Path.home() / "AppData" / "Roaming" / "AutoVT"  # 再兜底常见 Roaming 路径。
+    # Linux/其他：优先 XDG_STATE_HOME，兜底 ~/.local/state。
+    xdg_state_home = os.environ.get("XDG_STATE_HOME", "").strip()
+    if xdg_state_home:
+        return Path(xdg_state_home) / "autovt"
+    return Path.home() / ".local" / "state" / "autovt"
+
+
+# 运行期数据根目录（日志等写到这里，不写到代码目录）。
+RUNTIME_DATA_DIR = _resolve_runtime_data_dir()
+# 日志目录（跨平台可写，适合源码和打包两种运行方式）。
+LOG_DIR = RUNTIME_DATA_DIR / "log"
+# JSON 日志目录（manager/worker 都写这里）。
+JSON_LOG_DIR = LOG_DIR / "json"
 
 # 当前运行语言（例如 fr、en、zh）
 LOCALE = "fr"
@@ -42,6 +76,10 @@ WORKER_MAX_INIT_RETRIES = 0
 LOG_LEVEL = "INFO"
 # 是否开启 Airtest/Poco 第三方 DEBUG 日志
 ENABLE_AIRTEST_DEBUG = False
+# 是否保存 Airtest 截图文件（False 时不再生成一堆 *.jpg 调试图）。
+AIRTEST_SAVE_IMAGE = _env_bool("AUTOVT_AIRTEST_SAVE_IMAGE", False)
+# 是否在每次 Poco 动作后自动截图（False 可显著减少图片落盘和磁盘占用）。
+POCO_SCREENSHOT_EACH_ACTION = _env_bool("AUTOVT_POCO_SCREENSHOT_EACH_ACTION", False)
 
 # 当前任务图片目录：images/<语言>/<业务模块>/
 FEATURE_IMAGE_DIR = IMAGES_DIR / LOCALE / FEATURE_NAME
