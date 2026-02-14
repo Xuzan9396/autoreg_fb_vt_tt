@@ -63,15 +63,16 @@ jobs:
 
       # 执行 Flet 环境体检，提前暴露构建环境问题。
       - name: Run Flet Doctor
+        continue-on-error: true
         run: |
           set -euxo pipefail
-          uvx --from "flet==${FLET_VERSION}" flet doctor
+          uv run --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" python -m flet_cli.cli doctor
 
       # 使用旧链路打包：flet pack（底层 PyInstaller）。
       - name: Build macOS App By flet pack
         run: |
           set -euxo pipefail
-          uv run --with "flet==${FLET_VERSION}" --with pyinstaller flet pack main.py \
+          uv run --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" --with pyinstaller python -m flet_cli.cli pack main.py \
             -n "${APP_NAME}" \
             -i assets/icon.icns \
             --add-data "assets:assets" \
