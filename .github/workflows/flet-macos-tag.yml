@@ -1,0 +1,120 @@
+---
+# 这个工作流用于在推送 tag 时自动构建 AutoVT 的 macOS 安装包（PyInstaller 路线）。
+name: Build PyInstaller macOS On Tag
+
+# 触发条件：仅在 tag push 时触发。
+"on":
+  push:
+    tags:
+      - "*"  # 任意 tag 都会触发，例如 v0.1.0。
+
+# 需要写仓库内容权限，用于创建 Release 并上传附件。
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    # 任务名称：构建 macOS ARM64 包。
+    name: Build macOS ARM64 Package (flet pack)
+    # 运行环境：GitHub 托管 macOS 14（Apple Silicon）。
+    runs-on: macos-14
+    # 任务最长执行时间，避免异常长时间占用。
+    timeout-minutes: 90
+
+    env:
+      # 固定 Python 版本为 3.13。
+      PYTHON_VERSION: "3.13"
+      # 固定 Flet 版本，确保构建结果可复现。
+      FLET_VERSION: "0.80.5"
+      # 应用展示名。
+      APP_NAME: "AutoVT"
+      # 最终压缩包输出目录。
+      DIST_DIR: "dist"
+
+    steps:
+      # 拉取当前 tag 对应的源码。
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      # 安装指定版本 Python（3.13）。
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 安装 uv，并开启依赖缓存。
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # 输出关键工具版本，方便排查 CI 环境问题。
+      - name: Print Tool Versions
+        run: |
+          set -euxo pipefail
+          python --version
+          uv --version
+
+      # 基于 uv.lock 安装依赖，确保依赖版本稳定。
+      - name: Install Dependencies By uv
+        run: |
+          set -euxo pipefail
+          uv sync --frozen --python "${PYTHON_VERSION}"
+
+      # 执行 Flet 环境体检，提前暴露构建环境问题。
+      - name: Run Flet Doctor
+        run: |
+          set -euxo pipefail
+          uvx --from "flet==${FLET_VERSION}" flet doctor
+
+      # 使用旧链路打包：flet pack（底层 PyInstaller）。
+      - name: Build macOS App By flet pack
+        run: |
+          set -euxo pipefail
+          uv run --with "flet==${FLET_VERSION}" --with pyinstaller flet pack main.py \
+            -n "${APP_NAME}" \
+            -i assets/icon.icns \
+            --add-data "assets:assets" \
+            --add-data "images:images" \
+            --add-data "adb:adb" \
+            --yes -v
+
+      # 将 .app 打成 zip，并生成 sha256 校验文件。
+      - name: Package macOS App
+        run: |
+          set -euxo pipefail
+          mkdir -p "${DIST_DIR}"
+          APP_PATH="dist/${APP_NAME}.app"
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "未找到 .app 产物，下面打印 dist 目录用于排查："
+            find dist -maxdepth 4 -print || true
+            exit 1
+          fi
+          ZIP_FILE="${DIST_DIR}/${APP_NAME}-macos-arm64-${GITHUB_REF_NAME}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_FILE}"
+          shasum -a 256 "${ZIP_FILE}" | tee "${ZIP_FILE}.sha256"
+
+      # 上传构建产物到 Actions 页面，便于快速下载验证。
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autovt-macos-arm64-${{ github.ref_name }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+      # 基于当前 tag 创建 GitHub Release，并附带构建产物。
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## AutoVT macOS ARM64 安装包（flet pack / PyInstaller）
+            - 下载 `AutoVT-macos-arm64-<tag>.zip`
+            - 解压后得到 `AutoVT.app`
+            - 首次打开若出现安全提示，请在系统设置中允许运行
