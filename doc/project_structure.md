@@ -59,7 +59,7 @@ autovt/
 - `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）。
-- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `uv + Python 3.13 + flet pack(PyInstaller)` 并上传 Release 产物）。
+- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）。
 
 其中 ADB 相关关键项：
 - `ADB_SERVER_ADDR`：ADB Server 地址（如 `127.0.0.1:5037`）。

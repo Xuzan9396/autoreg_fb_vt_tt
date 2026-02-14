@@ -382,7 +382,7 @@ $env:AUTOVT_ADB_BIN="C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-too
    - `manager.jsonl`：主控进程日志
    - `<设备序列号>.jsonl`：每台设备 worker 日志
 
-## 10. GitHub Actions（Tag 触发 mac 打包）
+## 10. GitHub Actions（Tag 触发桌面打包）
 
 当前仓库已新增工作流：
 
@@ -397,12 +397,10 @@ git push origin v0.1.0
 
 工作流动作：
 
-1. 使用 `macos-14` runner。
-2. 安装 `Python 3.13`。
-3. 安装 `uv` 并执行 `uv sync --frozen`。
-4. 执行 `uvx --from flet==0.80.5 flet pack main.py`（PyInstaller 路线）构建 `.app`。
-6. 打包为 `dist/AutoVT-macos-arm64-<tag>.zip` 并生成 `.sha256`。
-7. 上传到 Actions Artifacts，并自动附加到当前 tag 的 GitHub Release。
+1. `build-macos`：在 `macos-14` 上执行 `flet pack`，产出 `AutoVT-macos-arm64-<tag>.zip`。
+2. `build-windows`：在 `windows-latest` 上执行 `flet pack`，产出 `AutoVT-windows-x64-<tag>.zip`。
+3. 两个平台都会生成对应 `.sha256` 文件并上传为 Artifacts。
+4. `release` job 会汇总两个平台产物并附加到当前 tag 的 GitHub Release。
 
 补充：
 

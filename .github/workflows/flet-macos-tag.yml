@@ -1,6 +1,6 @@
 ---
-# 这个工作流用于在推送 tag 时自动构建 AutoVT 的 macOS 安装包（PyInstaller 路线）。
-name: Build PyInstaller macOS On Tag
+# 这个工作流用于在推送 tag 时自动构建 AutoVT 的桌面安装包（macOS + Windows）。
+name: Build Desktop Packages On Tag
 
 # 触发条件：仅在 tag push 时触发。
 "on":
@@ -12,67 +12,67 @@ name: Build PyInstaller macOS On Tag
 permissions:
   contents: write
 
+env:
+  # 固定 Python 版本，确保构建环境稳定。
+  PYTHON_VERSION: "3.13"
+  # 固定 Flet 版本，确保命令行为可复现。
+  FLET_VERSION: "0.80.5"
+  # 应用名称。
+  APP_NAME: "AutoVT"
+
 jobs:
   build-macos:
-    # 任务名称：构建 macOS ARM64 包。
-    name: Build macOS ARM64 Package (flet pack)
-    # 运行环境：GitHub 托管 macOS 14（Apple Silicon）。
+    # macOS 构建任务（Apple Silicon）。
+    name: Build macOS ARM64 (flet pack)
     runs-on: macos-14
-    # 任务最长执行时间，避免异常长时间占用。
     timeout-minutes: 90
 
-    env:
-      # 固定 Python 版本为 3.13。
-      PYTHON_VERSION: "3.13"
-      # 固定 Flet 版本，确保构建结果可复现。
-      FLET_VERSION: "0.80.5"
-      # 应用展示名。
-      APP_NAME: "AutoVT"
-      # 最终压缩包输出目录。
-      DIST_DIR: "dist"
-
     steps:
-      # 拉取当前 tag 对应的源码。
+      # 拉取当前 tag 对应源码。
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      # 安装指定版本 Python（3.13）。
-      - name: Setup Python 3.13
+      # 安装 Python 3.13。
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # 安装 uv，并开启依赖缓存。
+      # 安装 uv。
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
-      # 输出关键工具版本，方便排查 CI 环境问题。
+      # 打印版本，便于排查环境问题。
       - name: Print Tool Versions
         run: |
           set -euxo pipefail
           python --version
           uv --version
 
-      # 基于 uv.lock 安装依赖，确保依赖版本稳定。
-      - name: Install Dependencies By uv
+      # 安装项目依赖（锁定版本）。
+      - name: Install Dependencies
         run: |
           set -euxo pipefail
           uv sync --frozen --python "${PYTHON_VERSION}"
 
-      # 执行 Flet 环境体检，提前暴露构建环境问题。
+      # 环境体检（失败不阻塞打包，避免 doctor 偶发问题导致整体失败）。
       - name: Run Flet Doctor
         continue-on-error: true
         run: |
           set -euxo pipefail
           uv run --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" python -m flet_cli.cli doctor
 
-      # 使用旧链路打包：flet pack（底层 PyInstaller）。
-      - name: Build macOS App By flet pack
+      # 用 flet pack（PyInstaller）构建 macOS 应用。
+      - name: Build macOS App
         run: |
           set -euxo pipefail
-          uv run --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" --with pyinstaller python -m flet_cli.cli pack main.py \
+          uv run \
+            --with "flet==${FLET_VERSION}" \
+            --with "flet-cli==${FLET_VERSION}" \
+            --with pyinstaller \
+            python -m flet_cli.cli pack main.py \
             -n "${APP_NAME}" \
             -i assets/icon.icns \
             --add-data "assets:assets" \
@@ -80,42 +80,187 @@ jobs:
             --add-data "adb:adb" \
             --yes -v
 
-      # 将 .app 打成 zip，并生成 sha256 校验文件。
-      - name: Package macOS App
+      # 打包 macOS 产物并生成 sha256。
+      - name: Package macOS Artifact
         run: |
           set -euxo pipefail
-          mkdir -p "${DIST_DIR}"
+          mkdir -p dist-release
           APP_PATH="dist/${APP_NAME}.app"
           if [ ! -d "${APP_PATH}" ]; then
-            echo "未找到 .app 产物，下面打印 dist 目录用于排查："
+            echo "未找到 macOS .app 产物：${APP_PATH}"
             find dist -maxdepth 4 -print || true
             exit 1
           fi
-          ZIP_FILE="${DIST_DIR}/${APP_NAME}-macos-arm64-${GITHUB_REF_NAME}.zip"
+          ZIP_FILE="dist-release/${APP_NAME}-macos-arm64-${GITHUB_REF_NAME}.zip"
           ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_FILE}"
           shasum -a 256 "${ZIP_FILE}" | tee "${ZIP_FILE}.sha256"
 
-      # 上传构建产物到 Actions 页面，便于快速下载验证。
-      - name: Upload Build Artifacts
+      # 上传 macOS 构建产物。
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autovt-macos-arm64-${{ github.ref_name }}
           path: |
-            dist/*.zip
-            dist/*.sha256
+            dist-release/*.zip
+            dist-release/*.sha256
 
-      # 基于当前 tag 创建 GitHub Release，并附带构建产物。
-      - name: Create GitHub Release
+  build-windows:
+    # Windows 构建任务（x64）。
+    name: Build Windows x64 (flet pack)
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      # 拉取当前 tag 对应源码。
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      # 安装 Python 3.13。
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 安装 uv。
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # 打印版本，便于排查环境问题。
+      - name: Print Tool Versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python --version
+          uv --version
+
+      # 安装项目依赖（锁定版本）。
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv sync --frozen --python "${env:PYTHON_VERSION}"
+
+      # 环境体检（失败不阻塞打包，避免 doctor 偶发问题导致整体失败）。
+      - name: Run Flet Doctor
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv run --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" python -m flet_cli.cli doctor
+
+      # 用 flet pack（PyInstaller）构建 Windows 应用。
+      - name: Build Windows App
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $args = @(
+            "--with", "flet==$env:FLET_VERSION",
+            "--with", "flet-cli==$env:FLET_VERSION",
+            "--with", "pyinstaller",
+            "python", "-m", "flet_cli.cli",
+            "pack", "main.py",
+            "-n", "$env:APP_NAME",
+            "--add-data", "assets;assets",
+            "--add-data", "images;images",
+            "--add-data", "adb;adb",
+            "--yes", "-v"
+          )
+
+          # Windows 图标优先使用 icon.ico，若不存在则跳过图标参数。
+          if (Test-Path "assets/icon.ico") {
+            $args += @("-i", "assets/icon.ico")
+          } else {
+            Write-Host "assets/icon.ico 不存在，跳过 Windows 图标参数"
+          }
+
+          uv run @args
+
+      # 打包 Windows 产物并生成 sha256。
+      - name: Package Windows Artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "dist-release" | Out-Null
+
+          $exePath = "dist/$env:APP_NAME.exe"
+          if (-not (Test-Path $exePath)) {
+            Write-Host "未找到 Windows exe 产物：$exePath"
+            Get-ChildItem -Recurse dist -ErrorAction SilentlyContinue | Select-Object FullName, Length
+            throw "Windows 产物缺失"
+          }
+
+          $zipPath = "dist-release/$env:APP_NAME-windows-x64-$env:GITHUB_REF_NAME.zip"
+          Compress-Archive -Path $exePath -DestinationPath $zipPath -Force
+
+          $sha = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLower()
+          "$sha  $(Split-Path $zipPath -Leaf)" | Out-File "$zipPath.sha256" -Encoding ascii
+
+      # 上传 Windows 构建产物。
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autovt-windows-x64-${{ github.ref_name }}
+          path: |
+            dist-release/*.zip
+            dist-release/*.sha256
+
+  release:
+    # 汇总两个平台产物并创建 Release。
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-macos
+      - build-windows
+
+    steps:
+      # 下载 macOS 构建产物。
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: autovt-macos-arm64-${{ github.ref_name }}
+          path: artifacts/macos
+
+      # 下载 Windows 构建产物。
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: autovt-windows-x64-${{ github.ref_name }}
+          path: artifacts/windows
+
+      # 列出下载结果，便于排查路径问题。
+      - name: List Downloaded Artifacts
+        run: |
+          set -euxo pipefail
+          echo "macOS artifacts:"
+          ls -lah artifacts/macos
+          echo "windows artifacts:"
+          ls -lah artifacts/windows
+
+      # 创建 Release 并附加两个平台产物。
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.zip
-            dist/*.sha256
+            artifacts/macos/*.zip
+            artifacts/macos/*.sha256
+            artifacts/windows/*.zip
+            artifacts/windows/*.sha256
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## AutoVT macOS ARM64 安装包（flet pack / PyInstaller）
+            ## AutoVT 桌面安装包（flet pack / PyInstaller）
+
+            ### macOS ARM64
             - 下载 `AutoVT-macos-arm64-<tag>.zip`
             - 解压后得到 `AutoVT.app`
-            - 首次打开若出现安全提示，请在系统设置中允许运行
+
+            ### Windows x64
+            - 下载 `AutoVT-windows-x64-<tag>.zip`
+            - 解压后得到 `AutoVT.exe`
+
+            ### 说明
+            - 首次打开若出现安全提示，请在系统设置里允许运行。
+            - 如需校验完整性，可使用同名 `.sha256` 文件。
