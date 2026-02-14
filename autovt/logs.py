@@ -135,6 +135,19 @@ def _compact_json_patcher(record: dict) -> None:
     record["extra"]["compact_json"] = json.dumps({"text": text}, ensure_ascii=False)
 
 
+def _resolve_console_sink():
+    # Windows noconsole 打包时，sys.stderr/sys.stdout 可能是 None，需要先做可写性探测。
+    stderr_obj = getattr(sys, "stderr", None)  # 读取标准错误对象，可能为 None。
+    if stderr_obj is not None and hasattr(stderr_obj, "write"):  # 优先使用 stderr，避免干扰标准输出。
+        return stderr_obj  # 返回可写 stderr 作为控制台 sink。
+
+    stdout_obj = getattr(sys, "stdout", None)  # 兜底读取标准输出对象，可能为 None。
+    if stdout_obj is not None and hasattr(stdout_obj, "write"):  # 若 stdout 可写，则作为控制台 sink。
+        return stdout_obj  # 返回可写 stdout，保证源码运行仍可看到日志。
+
+    return None  # 两者都不可写时返回 None，让上层跳过控制台 sink 注册。
+
+
 def setup_logging(process_role: str, serial: str | None = None) -> None:
     """
     初始化日志系统：
@@ -162,16 +175,18 @@ def setup_logging(process_role: str, serial: str | None = None) -> None:
         patcher=_compact_json_patcher,
     )
 
-    # 终端 JSON（stderr，不干扰交互输入）。
-    logger.add(
-        sys.stderr,
-        level=level,
-        format="{extra[compact_json]}",
-        serialize=False,
-        enqueue=True,
-        backtrace=False,
-        diagnose=False,
-    )
+    # 终端 JSON（优先 stderr；在 Windows noconsole 打包场景下可能不存在）。
+    console_sink = _resolve_console_sink()  # 先解析可用控制台 sink，避免把 None 传给 loguru。
+    if console_sink is not None:  # 仅在存在可写控制台流时注册控制台输出。
+        logger.add(
+            console_sink,
+            level=level,
+            format="{extra[compact_json]}",
+            serialize=False,
+            enqueue=True,
+            backtrace=False,
+            diagnose=False,
+        )
 
     # 文件 JSON（jsonl，每行一条日志）。
     logger.add(
