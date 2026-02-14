@@ -406,3 +406,5 @@ git push origin v0.1.0
 
 1. GitHub Actions 不会复用你本机 shell 环境，所以本机 `PATH` 类问题通常不会直接复现到 CI。
 2. 但“代码级问题”（例如多进程入口处理不当导致双窗口）在本机和 CI 打包产物中都可能出现，因此仍需在代码里修复。
+3. Windows workflow 固定 `Python 3.12`，macOS workflow 使用 `Python 3.13`。
+4. 如果遇到 Windows `exit code 3221225477`（`PyInstaller.isolated._parent.SubprocessDiedError`），优先确认没有把 Windows job 改回 `Python 3.13`。

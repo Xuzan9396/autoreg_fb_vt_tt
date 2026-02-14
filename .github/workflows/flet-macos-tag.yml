@@ -13,8 +13,10 @@ permissions:
   contents: write
 
 env:
-  # 固定 Python 版本，确保构建环境稳定。
-  PYTHON_VERSION: "3.13"
+  # macOS 构建 Python 版本。
+  PYTHON_VERSION_MACOS: "3.13"
+  # Windows 构建 Python 版本（PyInstaller + numpy/cv2 组合在 3.12 更稳定）。
+  PYTHON_VERSION_WINDOWS: "3.12"
   # 固定 Flet 版本，确保命令行为可复现。
   FLET_VERSION: "0.80.5"
   # 应用名称。
@@ -36,7 +38,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION_MACOS }}
 
       # 安装 uv。
       - name: Setup uv
@@ -55,7 +57,13 @@ jobs:
       - name: Install Dependencies
         run: |
           set -euxo pipefail
-          uv sync --frozen --python "${PYTHON_VERSION}"
+          uv sync --frozen --python "${PYTHON_VERSION_MACOS}"
+
+      # 清理仓库中可能遗留的 spec，避免参数漂移导致打包不一致。
+      - name: Clean Stale Spec
+        run: |
+          set -euxo pipefail
+          rm -f "${APP_NAME}.spec"
 
       # 环境体检（失败不阻塞打包，避免 doctor 偶发问题导致整体失败）。
       - name: Run Flet Doctor
@@ -115,11 +123,11 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      # 安装 Python 3.13。
+      # 安装 Python（Windows 固定 3.12，规避 PyInstaller + numpy/cv2 崩溃）。
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION_WINDOWS }}
 
       # 安装 uv。
       - name: Setup uv
@@ -140,7 +148,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          uv sync --frozen --python "${env:PYTHON_VERSION}"
+          uv sync --frozen --python "${env:PYTHON_VERSION_WINDOWS}"
+
+      # 清理仓库中可能遗留的 spec，避免参数漂移导致打包不一致。
+      - name: Clean Stale Spec
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path "$env:APP_NAME.spec") {
+            Remove-Item "$env:APP_NAME.spec" -Force
+          }
 
       # 环境体检（失败不阻塞打包，避免 doctor 偶发问题导致整体失败）。
       - name: Run Flet Doctor
