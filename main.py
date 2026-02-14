@@ -1,12 +1,7 @@
 import argparse  # 导入参数解析库，用于支持 GUI/CLI 模式切换。
 import multiprocessing as mp  # 导入多进程模块，用于 frozen 场景下正确接管子进程启动。
 
-from autovt.cli import run_console  # 导入命令行主循环函数，作为可选回退模式。
-from autovt.gui import run_gui  # 导入 GUI 启动函数，作为默认入口模式。
-from autovt.logs import get_logger, setup_logging  # 导入日志初始化和日志对象工厂。
 from autovt.settings import WORKER_LOOP_INTERVAL_SEC  # 导入默认 worker 循环间隔配置。
-
-log = get_logger("main")  # 创建 main 模块日志对象。
 
 
 def parse_args() -> argparse.Namespace:  # 解析主入口参数。
@@ -27,7 +22,15 @@ def parse_args() -> argparse.Namespace:  # 解析主入口参数。
 
 
 def main() -> None:  # 主函数：根据模式分发到 GUI 或 CLI。
-    mp.freeze_support()  # 兼容打包后的多进程子进程入口，避免子进程误进入 GUI 主流程导致重复窗口。
+    # 尽早调用 freeze_support：官方推荐在冻结程序里尽早执行，避免子进程误走主程序逻辑。
+    mp.freeze_support()
+
+    # 延后导入重型模块：确保子进程在 freeze_support 分流后，不会先触发 GUI/日志初始化副作用。
+    from autovt.cli import run_console  # 导入命令行主循环函数，作为可选回退模式。
+    from autovt.gui import run_gui  # 导入 GUI 启动函数，作为默认入口模式。
+    from autovt.logs import get_logger, setup_logging  # 导入日志初始化和日志对象工厂。
+
+    log = get_logger("main")  # 创建 main 模块日志对象（放在延后导入后初始化）。
     args = parse_args()  # 解析启动参数。
     setup_logging(process_role="manager")  # 初始化主进程日志配置。
     log.info("主入口启动", mode=args.mode, interval=args.interval)  # 记录启动参数日志。

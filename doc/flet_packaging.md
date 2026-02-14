@@ -408,3 +408,4 @@ git push origin v0.1.0
 2. 但“代码级问题”（例如多进程入口处理不当导致双窗口）在本机和 CI 打包产物中都可能出现，因此仍需在代码里修复。
 3. Windows workflow 固定 `Python 3.12`，macOS workflow 使用 `Python 3.13`。
 4. 如果遇到 Windows `exit code 3221225477`（`PyInstaller.isolated._parent.SubprocessDiedError`），优先确认没有把 Windows job 改回 `Python 3.13`。
+5. 当前仓库 `.python-version` 是 `3.13`，Windows job 里必须给 `uv run` 显式传 `--python`（或设置 `UV_PYTHON`），否则可能被带回 `3.13` 导致再次崩溃。

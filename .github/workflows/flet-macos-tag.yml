@@ -70,13 +70,14 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-          uv run --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" python -m flet_cli.cli doctor
+          uv run --python "${PYTHON_VERSION_MACOS}" --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" python -m flet_cli.cli doctor
 
       # 用 flet pack（PyInstaller）构建 macOS 应用。
       - name: Build macOS App
         run: |
           set -euxo pipefail
           uv run \
+            --python "${PYTHON_VERSION_MACOS}" \
             --with "flet==${FLET_VERSION}" \
             --with "flet-cli==${FLET_VERSION}" \
             --with pyinstaller \
@@ -150,6 +151,25 @@ jobs:
           $ErrorActionPreference = "Stop"
           uv sync --frozen --python "${env:PYTHON_VERSION_WINDOWS}"
 
+      # 锁定 uv 运行时 Python：避免被仓库 .python-version(3.13) 覆盖成 3.13。
+      - name: Pin UV Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $uvPython = Join-Path $env:pythonLocation "python.exe"
+          if (-not (Test-Path $uvPython)) {
+            throw "未找到 setup-python 安装的解释器: $uvPython"
+          }
+          "UV_PYTHON=$uvPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Pinned UV_PYTHON=$uvPython"
+
+      # 验证 uv 实际使用的解释器版本（应为 3.12）。
+      - name: Verify UV Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          uv run --python "$env:UV_PYTHON" python -c "import sys,platform; print(sys.version); print(sys.executable); print(platform.python_version())"
+
       # 清理仓库中可能遗留的 spec，避免参数漂移导致打包不一致。
       - name: Clean Stale Spec
         shell: pwsh
@@ -165,7 +185,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          uv run --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" python -m flet_cli.cli doctor
+          uv run --python "$env:UV_PYTHON" --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" python -m flet_cli.cli doctor
 
       # 用 flet pack（PyInstaller）构建 Windows 应用。
       - name: Build Windows App
@@ -173,6 +193,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $args = @(
+            "--python", "$env:UV_PYTHON",
             "--with", "flet==$env:FLET_VERSION",
             "--with", "flet-cli==$env:FLET_VERSION",
             "--with", "pyinstaller",

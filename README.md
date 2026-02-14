@@ -1,6 +1,6 @@
 # autovt
 
-git tag -a v0.0.4 -m "修改" &&  git push origin v0.0.4
+git tag -a v0.0.5 -m "修改" &&  git push origin v0.0.5
 
 https://www.fakenamegenerator.com/gen-random-us-fr.php
 名字生成器

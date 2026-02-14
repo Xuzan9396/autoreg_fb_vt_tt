@@ -86,13 +86,23 @@ class AutoVTGuiApp:
         self.page.window.min_width = 980  # 限制最小宽度，防止缩放到“手机模式”布局。
         self.page.window.min_height = 640  # 限制最小高度，保证顶部按钮和列表可见。
         self.page.window.maximized = False  # 关闭默认最大化，恢复普通窗口启动行为。
+        self.page.window.alignment = ft.Alignment.CENTER  # 声明窗口默认对齐方式为居中，减少启动后跳位。
         self.page.window.icon = "icon.png"  # 设置运行时窗口图标（从 assets 目录加载）。
 
     def _register_exit_hook(self) -> None:
         atexit.register(self._shutdown)
 
     def start(self) -> None:
-        self.login_view.build()
+        self.login_view.build()  # 先构建登录界面，保证窗口首次展示时已有完整内容。
+        self.page.run_task(self._show_window_centered_async)  # 异步执行窗口居中并显示，避免阻塞 UI 线程。
+
+    async def _show_window_centered_async(self) -> None:
+        try:  # 优先走“等待就绪 -> 居中”的平滑启动路径。
+            await self.page.window.wait_until_ready_to_show()  # 等待原生窗口可安全操作，减少平台时序问题。
+            await self.page.window.center()  # 将窗口移动到当前屏幕中心，提升首次打开体验。
+            self.page.update()  # 提交窗口位置变更。
+        except Exception:
+            log.exception("窗口居中显示失败")  # 记录异常堆栈，便于定位某些平台的窗口 API 兼容问题。
 
     # ═══════════════════════════════════════════════════════════════════
     # 登录成功回调
