@@ -70,7 +70,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-          uv run --python "${PYTHON_VERSION_MACOS}" --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" python -m flet_cli.cli doctor
+          uv run --python "${PYTHON_VERSION_MACOS}" --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" --with "flet-desktop==${FLET_VERSION}" python -m flet_cli.cli doctor
 
       # 用 flet pack（PyInstaller）构建 macOS 应用。
       - name: Build macOS App
@@ -80,6 +80,7 @@ jobs:
             --python "${PYTHON_VERSION_MACOS}" \
             --with "flet==${FLET_VERSION}" \
             --with "flet-cli==${FLET_VERSION}" \
+            --with "flet-desktop==${FLET_VERSION}" \
             --with pyinstaller \
             python -m flet_cli.cli pack main.py \
             -n "${APP_NAME}" \
@@ -185,7 +186,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          uv run --python "$env:UV_PYTHON" --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" python -m flet_cli.cli doctor
+          uv run --python "$env:UV_PYTHON" --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" --with "flet-desktop==${env:FLET_VERSION}" python -m flet_cli.cli doctor
 
       # 用 flet pack（PyInstaller）构建 Windows 应用。
       - name: Build Windows App
@@ -196,6 +197,7 @@ jobs:
             "--python", "$env:UV_PYTHON",
             "--with", "flet==$env:FLET_VERSION",
             "--with", "flet-cli==$env:FLET_VERSION",
+            "--with", "flet-desktop==$env:FLET_VERSION",
             "--with", "pyinstaller",
             "python", "-m", "flet_cli.cli",
             "pack", "main.py",
