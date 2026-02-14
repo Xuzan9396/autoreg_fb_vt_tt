@@ -37,6 +37,23 @@ def _prepend_to_path(dir_path: str) -> None:
     os.environ["PATH"] = os.pathsep.join([dir_path, *parts]) if parts else dir_path
 
 
+def _hidden_subprocess_kwargs() -> dict:
+    """返回子进程启动参数（Windows 下隐藏 adb 命令窗口）。"""
+    # 仅 Windows 需要处理“命令窗闪烁”问题。
+    if not platform.system().lower().startswith("win"):
+        return {}
+
+    # 优先使用 Python 提供的 CREATE_NO_WINDOW 常量；旧环境兜底硬编码值。
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    startupinfo = subprocess.STARTUPINFO()  # 构造 Windows 启动信息对象。
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # 告诉系统使用窗口显示控制标志。
+    startupinfo.wShowWindow = 0  # SW_HIDE：隐藏窗口。
+    return {
+        "creationflags": create_no_window,
+        "startupinfo": startupinfo,
+    }
+
+
 def _bundled_adb_candidates() -> list[str]:
     """返回项目内置 adb 候选路径（优先用于打包后运行）。"""
     # 统一读取系统标识，用于区分 mac / windows 目录。
@@ -253,6 +270,7 @@ def list_online_serials() -> list[str]:
             capture_output=True,
             text=True,
             check=True,
+            **_hidden_subprocess_kwargs(),  # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
         )
         log.debug("执行 adb devices 成功")
     except FileNotFoundError as exc:

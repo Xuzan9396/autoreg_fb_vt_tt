@@ -1,6 +1,6 @@
 # autovt
 
-git tag -a v0.0.7 -m "修改" &&  git push origin v0.0.7
+git tag -a v0.0.9 -m "修改" &&  git push origin v0.0.9
 
 https://www.fakenamegenerator.com/gen-random-us-fr.php
 名字生成器
@@ -59,6 +59,39 @@ CLI 可用命令定义在 `autovt/cli.py`。
 
 目录结构和维护说明见 `doc/project_structure.md`。
 Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
+
+## mac 本地测试打包（推荐）
+
+先在项目根目录执行（`/Users/admin/go/src/autovt`）：
+
+```bash
+# 1) 安装依赖
+uv sync
+
+# 2) 解析 poco Android 资源目录（确保 pocoservice-debug.apk 被打进包）
+POCO_ANDROID_LIB_DIR="$(uv run python -c 'from pathlib import Path; import poco; print((Path(poco.__file__).resolve().parent / "drivers" / "android" / "lib").as_posix())')"
+
+# 3) 执行打包（mac 仅打 adb/mac）
+uv run \
+  --python 3.13 \
+  --with "flet==0.80.5" \
+  --with "flet-cli==0.80.5" \
+  --with "flet-desktop==0.80.5" \
+  --with pyinstaller \
+  python -m flet_cli.cli pack main.py \
+  -n "AutoVT" \
+  --product-name "AutoVT" \
+  -i assets/icon.icns \
+  --add-data "assets:assets" \
+  --add-data "images:images" \
+  --add-data "adb/mac:adb/mac" \
+  --add-data "${POCO_ANDROID_LIB_DIR}:poco/drivers/android/lib" \
+  --yes -v
+```
+
+打包产物：
+
+- `dist/AutoVT.app`
 
 ## 日志（loguru）
 

@@ -275,6 +275,7 @@ killall Dock
 6. `CocoaPods out of date`：通常是警告，不一定阻塞 macOS 构建；先把 `xcodebuild` 问题修好再处理。
 7. `flutter/dart not on PATH`：对 `flet pack` 一般不是阻塞项。
 8. Android `cmdline-tools` / `android-licenses`：做 macOS 桌面打包时可忽略。
+9. Windows 打包后若报 `pocoservice-debug.apk` 不存在：属于 `poco` 资源文件未被打入包。当前 workflow 已自动解析并注入 `poco/drivers/android/lib`，请使用最新 workflow 重新打 tag 构建。
 
 ### 9.1 打包后出现 2 个窗口（一个空白，一个正常）
 

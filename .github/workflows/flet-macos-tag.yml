@@ -72,6 +72,18 @@ jobs:
           set -euxo pipefail
           uv run --python "${PYTHON_VERSION_MACOS}" --with "flet==${FLET_VERSION}" --with "flet-cli==${FLET_VERSION}" --with "flet-desktop==${FLET_VERSION}" python -m flet_cli.cli doctor
 
+      # 解析 poco Android 驱动资源目录（包含 pocoservice-debug.apk），用于显式打包。
+      - name: Resolve Poco Android Lib Dir
+        run: |
+          set -euxo pipefail
+          POCO_ANDROID_LIB_DIR="$(uv run --python "${PYTHON_VERSION_MACOS}" python -c 'from pathlib import Path; import poco; print((Path(poco.__file__).resolve().parent / "drivers" / "android" / "lib").as_posix())')"
+          if [ -z "${POCO_ANDROID_LIB_DIR}" ] || [ ! -d "${POCO_ANDROID_LIB_DIR}" ]; then
+            echo "未找到 poco Android 资源目录: ${POCO_ANDROID_LIB_DIR}"
+            exit 1
+          fi
+          ls -lah "${POCO_ANDROID_LIB_DIR}"
+          echo "POCO_ANDROID_LIB_DIR=${POCO_ANDROID_LIB_DIR}" >> "$GITHUB_ENV"
+
       # 用 flet pack（PyInstaller）构建 macOS 应用。
       - name: Build macOS App
         run: |
@@ -84,10 +96,12 @@ jobs:
             --with pyinstaller \
             python -m flet_cli.cli pack main.py \
             -n "${APP_NAME}" \
+            --product-name "${APP_NAME}" \
             -i assets/icon.icns \
             --add-data "assets:assets" \
             --add-data "images:images" \
             --add-data "adb/mac:adb/mac" \
+            --add-data "${POCO_ANDROID_LIB_DIR}:poco/drivers/android/lib" \
             --yes -v
 
       # 打包 macOS 产物并生成 sha256。
@@ -188,6 +202,21 @@ jobs:
           $ErrorActionPreference = "Stop"
           uv run --python "$env:UV_PYTHON" --with "flet==${env:FLET_VERSION}" --with "flet-cli==${env:FLET_VERSION}" --with "flet-desktop==${env:FLET_VERSION}" python -m flet_cli.cli doctor
 
+      # 解析 poco Android 驱动资源目录（包含 pocoservice-debug.apk），用于显式打包。
+      - name: Resolve Poco Android Lib Dir
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pocoLib = uv run --python "$env:UV_PYTHON" python -c "from pathlib import Path; import poco; print((Path(poco.__file__).resolve().parent / 'drivers' / 'android' / 'lib'))"
+          if (-not $pocoLib) {
+            throw "解析 POCO_ANDROID_LIB_DIR 失败（空值）"
+          }
+          if (-not (Test-Path $pocoLib)) {
+            throw "未找到 poco Android 资源目录: $pocoLib"
+          }
+          Get-ChildItem -Force $pocoLib | Format-Table Name, Length
+          "POCO_ANDROID_LIB_DIR=$pocoLib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       # 用 flet pack（PyInstaller）构建 Windows 应用。
       - name: Build Windows App
         shell: pwsh
@@ -202,9 +231,13 @@ jobs:
             "python", "-m", "flet_cli.cli",
             "pack", "main.py",
             "-n", "$env:APP_NAME",
+            "--product-name", "$env:APP_NAME",
+            "--file-description", "$env:APP_NAME",
+            "--company-name", "AutoVT",
             "--add-data", "assets;assets",
             "--add-data", "images;images",
             "--add-data", "adb/windows;adb/windows",
+            "--add-data", "$env:POCO_ANDROID_LIB_DIR;poco/drivers/android/lib",
             "--yes", "-v"
           )
 
