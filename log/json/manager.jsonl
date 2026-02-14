@@ -1329,3 +1329,7 @@ RuntimeError: An attempt to fetch destroyed session.
 {"text": "2026-02-14 16:48:45.871 | INFO     | __main__:main:31 - 主入口启动 | component=main device_serial= interval=2.0 mode=gui process_role=manager"}
 {"text": "2026-02-14 16:48:48.140 | INFO     | autovt.multiproc.manager:__init__:53 - DeviceProcessManager 初始化完成 | component=manager device_serial= loop_interval_sec=2.0 process_role=manager"}
 {"text": "2026-02-14 16:48:52.001 | INFO     | autovt.gui.app:_shutdown:260 - GUI 退出清理完成 | component=gui count=1 device_serial= messages=[\"当前无运行中的设备进程\"] process_role=manager"}
+{"text": "2026-02-14 17:28:28.555 | INFO     | autovt.logs:setup_logging:171 - 日志系统初始化完成 | airtest_debug=False component=logging device_serial= log_file=/Users/admin/go/src/autovt/log/json/manager.jsonl log_level=INFO process_role=manager"}
+{"text": "2026-02-14 17:28:28.555 | INFO     | __main__:main:31 - 主入口启动 | component=main device_serial= interval=2.0 mode=gui process_role=manager"}
+{"text": "2026-02-14 17:28:32.632 | INFO     | autovt.multiproc.manager:__init__:53 - DeviceProcessManager 初始化完成 | component=manager device_serial= loop_interval_sec=2.0 process_role=manager"}
+{"text": "2026-02-14 17:30:32.232 | INFO     | autovt.gui.app:_shutdown:260 - GUI 退出清理完成 | component=gui count=1 device_serial= messages=[\"当前无运行中的设备进程\"] process_role=manager"}
