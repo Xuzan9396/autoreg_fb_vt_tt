@@ -87,7 +87,7 @@ jobs:
             -i assets/icon.icns \
             --add-data "assets:assets" \
             --add-data "images:images" \
-            --add-data "adb:adb" \
+            --add-data "adb/mac:adb/mac" \
             --yes -v
 
       # 打包 macOS 产物并生成 sha256。
@@ -204,7 +204,7 @@ jobs:
             "-n", "$env:APP_NAME",
             "--add-data", "assets;assets",
             "--add-data", "images;images",
-            "--add-data", "adb;adb",
+            "--add-data", "adb/windows;adb/windows",
             "--yes", "-v"
           )
 

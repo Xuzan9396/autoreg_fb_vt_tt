@@ -52,7 +52,7 @@ uv flet pack main.py \
   -i assets/icon.icns \
   --add-data "assets:assets" \
   --add-data "images:images" \
-  --add-data "adb:adb" \
+  --add-data "adb/mac:adb/mac" \
   --yes -v
 ```
 
@@ -74,7 +74,7 @@ uv run --with flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes
 
 1. `--add-data "assets:assets"`：把运行时图标与静态资源一并打进包。
 2. `--add-data "images:images"`：把业务模板图资源一并打进包。
-3. `--add-data "adb:adb"`：把内置 adb 一并打进包，避免 Finder 启动时 PATH 丢失问题。
+3. `--add-data "adb/mac:adb/mac"`（mac）/`--add-data "adb/windows;adb/windows"`（windows）：仅打包当前平台 adb，减小体积并避免混入另一平台二进制。
 4. `--yes`：自动确认覆盖提示，适合 CI。
 
 产物一般在：
@@ -302,7 +302,7 @@ uvx --from flet==0.80.5 flet pack main.py \
   -i assets/icon.icns \
   --add-data "assets:assets" \
   --add-data "images:images" \
-  --add-data "adb:adb" \
+  --add-data "adb/mac:adb/mac" \
   --yes -v
 ```
 
@@ -401,6 +401,7 @@ git push origin v0.1.0
 2. `build-windows`：在 `windows-latest` 上执行 `flet pack`，产出 `AutoVT-windows-x64-<tag>.zip`。
 3. 两个平台都会生成对应 `.sha256` 文件并上传为 Artifacts。
 4. `release` job 会汇总两个平台产物并附加到当前 tag 的 GitHub Release。
+5. `adb` 资源按平台拆分打包：macOS 仅打 `adb/mac`，Windows 仅打 `adb/windows`。
 
 补充：
 
