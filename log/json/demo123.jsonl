@@ -1,0 +1,2 @@
+{"text": "2026-02-11 17:33:25.568 | INFO     | autovt.logs:setup_logging:166 - 日志系统初始化完成 | airtest_debug=false component=\"logging\" device_serial=\"demo123\" log_file=\"/Users/admin/go/src/go_cookies/autovt/log/json/demo123.jsonl\" log_level=\"INFO\" process_role=\"debug\""}
+{"text": "2026-02-11 17:33:25.568 | INFO     | __main__:<module>:4 - 识别到设备语言 | cmd=\"getprop persist.sys.locale\" component=\"autovt.multiproc.worker\" device_serial=\"demo123\" locale=\"en-US\" process_role=\"debug\""}

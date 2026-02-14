@@ -1,0 +1,3 @@
+{"tag": "function", "depth": 1, "time": 1770999708.5621278, "data": {"name": "connect_device", "call_args": {"uri": "android://127.0.0.1:5037/64fb07e2?cap_method=javacap&touch_method=maxtouch", "device": "64fb07e2"}, "start_time": 1770999708.376457, "ret": "<Android '64fb07e2'>", "end_time": 1770999708.5620658}}
+{"tag": "function", "depth": 1, "time": 1770999712.081644, "data": {"name": "sleep", "call_args": {"secs": 1, "device": "64fb07e2"}, "start_time": 1770999711.07619, "ret": null, "end_time": 1770999712.081504}}
+{"tag": "function", "depth": 1, "time": 1770999712.525204, "data": {"name": "start_app", "call_args": {"package": "com.facebook.katana", "activity": null, "device": "64fb07e2"}, "start_time": 1770999712.083118, "ret": null, "end_time": 1770999712.5250921}}

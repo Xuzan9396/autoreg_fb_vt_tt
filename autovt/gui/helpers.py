@@ -1,0 +1,132 @@
+"""GUI 共享常量、数据类和工具函数。"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+
+import flet as ft
+
+
+# ── 常量 ─────────────────────────────────────────────────────────────────
+
+LOGIN_USERNAME = "admin"
+LOGIN_PASSWORD = "123456"
+DEVICE_MONITOR_INTERVAL_SEC = 2.0
+ACCOUNT_PAGE_SIZE = 20  # 账号列表每页条数（固定 20，和需求保持一致）。
+MOJIWANG_RUN_NUM_KEY = "mojiwang_run_num"
+MOJIWANG_RUN_NUM_DESC = "抹机玩抹机次数: 1 到 100 填写值"
+STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
+STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号最大重试次数: 0 到 5 填写值"
+
+
+# ── 数据类 ────────────────────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class DeviceViewModel:
+    """设备列表每一行展示所需的数据模型。"""
+    serial: str
+    online: bool
+    pid: int
+    alive: str
+    state: str
+    detail: str
+    email_account: str
+    updated_at: float
+
+
+# ── 工具函数 ──────────────────────────────────────────────────────────────
+
+def state_color(state: str) -> str:
+    """根据设备状态返回标签颜色。"""
+    color_map = {
+        "ready": ft.Colors.BLUE_700,
+        "running": ft.Colors.GREEN_700,
+        "paused": ft.Colors.AMBER_700,
+        "recovering": ft.Colors.DEEP_ORANGE_500,
+        "warning": ft.Colors.ORANGE_600,
+        "error": ft.Colors.RED_700,
+        "fatal": ft.Colors.RED_900,
+        "stopping": ft.Colors.BLUE_GREY_700,
+        "stopped": ft.Colors.GREY_600,
+        "waiting": ft.Colors.AMBER_700,
+        "unknown": ft.Colors.GREY_700,
+        "idle": ft.Colors.GREY_600,
+        "starting": ft.Colors.LIGHT_BLUE_600,
+    }
+    return color_map.get(state, ft.Colors.GREY_600)
+
+
+def state_text(state: str) -> str:
+    """把设备状态英文值转为中文文案。"""
+    raw_state = str(state or "").strip()  # 读取原始状态并清理空白字符，避免异常值影响展示。
+    state_key = raw_state.lower()  # 统一转小写做映射匹配，兼容状态值大小写差异。
+    text_map = {  # 状态文案映射表（英文状态 -> 中文展示）。
+        "ready": "就绪",  # 初始化完成。
+        "running": "运行中",  # 正在执行任务。
+        "paused": "暂停中",  # 已暂停。
+        "recovering": "恢复中",  # 正在恢复运行时。
+        "warning": "警告",  # 业务可恢复警告态。
+        "error": "异常",  # 普通错误态。
+        "fatal": "致命错误",  # 致命错误态。
+        "stopping": "停止中",  # 正在停止。
+        "stopped": "已停止",  # 已停止。
+        "waiting": "等待账号",  # 无可用账号，等待新数据。
+        "unknown": "未知",  # 未知状态。
+        "idle": "空闲",  # 空闲未执行。
+        "starting": "启动中",  # 启动过程中。
+    }
+    if state_key in text_map:  # 命中已知状态映射时直接返回中文文案。
+        return text_map[state_key]
+    if raw_state == "":  # 空状态时返回占位符，避免显示空白标签。
+        return "-"
+    return raw_state  # 非空但未知状态时原样返回，便于排查新状态值。
+
+
+def register_status_text(value: int) -> str:
+    """把 fb/vt/tt 的注册状态数值转为中文文案。"""
+    mapping = {0: "未注册", 1: "成功", 2: "失败"}
+    return mapping.get(int(value), f"未知({int(value)})")
+
+
+def register_status_color(value: int) -> str:
+    """根据 fb/vt/tt 的注册状态返回标签颜色。"""
+    mapping = {0: ft.Colors.BLUE_GREY_600, 1: ft.Colors.GREEN_700, 2: ft.Colors.RED_700}
+    return mapping.get(int(value), ft.Colors.GREY_700)
+
+
+def account_status_text(value: int) -> str:
+    """把账号 status 数值转为中文文案。"""
+    mapping = {0: "未使用", 1: "正在使用", 2: "已经使用", 3: "账号问题"}
+    return mapping.get(int(value), f"未知({int(value)})")
+
+
+def account_status_color(value: int) -> str:
+    """根据账号 status 返回标签颜色。"""
+    mapping = {
+        0: ft.Colors.BLUE_GREY_600,
+        1: ft.Colors.LIGHT_BLUE_700,
+        2: ft.Colors.GREEN_700,
+        3: ft.Colors.RED_700,
+    }
+    return mapping.get(int(value), ft.Colors.GREY_700)
+
+
+def mask_access_key(raw_value: str) -> str:
+    """对 email_access_key 做前 10 位展示，后续以省略号隐藏。"""
+    clean_value = str(raw_value or "")
+    if clean_value == "":
+        return "-"
+    if len(clean_value) <= 10:
+        return clean_value
+    return f"{clean_value[:10]}..."
+
+
+def format_timestamp(ts_value: int) -> str:
+    """把秒级时间戳格式化为文本。"""
+    if ts_value <= 0:
+        return "-"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts_value)))
+    except Exception:
+        return str(ts_value)

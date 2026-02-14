@@ -1,0 +1,25 @@
+[project]
+name = "autovt"
+version = "0.1.0"
+description = "AutoVT Automation Project"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "loguru>=0.7.3",
+    "airtest~=1.4.3",
+    "pocoui~=1.0.94",
+    "flet~=0.80.5",
+    # 这一行是给你自己的代码用的，保证你在 Windows 上能 import win32api
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+# --- 核心魔法区域 ---
+[tool.uv]
+# 这里定义“覆盖规则”，它拥有最高优先级。
+# 它告诉 uv：不管是谁（比如 airtest）要求安装 pywin32，
+# 都必须遵守下面这个规则。
+override-dependencies = [
+    # 规则含义：只有在 Windows 系统上，pywin32 才是有效依赖。
+    # 结果：在 Mac 上，pywin32 会被视为“不需要安装”，从而绕过报错。
+    "pywin32>=306; sys_platform == 'win32'",
+]
