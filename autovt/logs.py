@@ -25,8 +25,10 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _resolve_airtest_debug() -> bool:
     # 打包运行永久关闭 Airtest/Poco debug（忽略环境变量），避免线上包出现大量第三方噪音日志。
-    executable_text = str(Path(sys.executable))  # 读取当前解释器或可执行文件路径。
-    argv0_text = str(Path(sys.argv[0])) if sys.argv else ""  # 读取 argv[0]，兼容部分子进程场景。
+    # 读取当前解释器或可执行文件路径。
+    executable_text = str(Path(sys.executable))
+    # 读取 argv[0]，兼容部分子进程场景。
+    argv0_text = str(Path(sys.argv[0])) if sys.argv else ""
     # 只要路径包含 .app/Contents/，就视为 macOS bundle 内运行（含 MacOS 与 Frameworks 子路径）。
     running_in_macos_bundle = ".app/Contents/" in executable_text or ".app/Contents/" in argv0_text
     # Windows 打包通常是 .exe；排除 python.exe/pythonw.exe，避免误伤源码调试。
@@ -42,7 +44,8 @@ def _resolve_airtest_debug() -> bool:
     # 源码运行时：环境变量优先，便于临时打开/关闭 debug：
     # AUTOVT_AIRTEST_DEBUG=1 python main.py
     env_value = os.getenv("AUTOVT_AIRTEST_DEBUG")
-    if env_value is not None:  # 显式设置时按环境变量走。
+    # 显式设置时按环境变量走。
+    if env_value is not None:
         return _env_bool("AUTOVT_AIRTEST_DEBUG", ENABLE_AIRTEST_DEBUG)
 
     # 源码模式按 settings 默认值执行。
@@ -102,31 +105,56 @@ def apply_third_party_log_policy() -> bool:
 
 def _build_compact_text(record: dict) -> str:
     # 生成紧凑文本：时间 + 级别 + 文件位置 + 消息 + 额外参数。
-    time_str = record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 提取毫秒级时间字符串，便于定位问题时间点。
-    level = record["level"].name  # 读取日志级别名称（INFO/WARNING/ERROR 等）。
-    name = record["name"]  # 读取日志记录器名字（通常是模块路径）。
-    function = record["function"]  # 读取函数名，方便快速定位调用点。
-    line = record["line"]  # 读取代码行号，便于直接跳转源码。
-    message = record["message"]  # 读取日志主消息文本。
-    extras = record.get("extra", {})  # 读取 loguru 的 extra 字段（bind 和 kwargs 都在这里）。
-    extra_pairs: list[str] = []  # 初始化额外参数字符串列表。
-    for key in sorted(extras):  # 按键名排序输出，保证日志顺序稳定可读。
-        if key == "compact_json":  # 跳过内部使用字段，避免递归污染输出。
-            continue  # 当前键处理完后直接看下一个键。
-        value = extras[key]  # 读取当前额外字段的值。
-        if isinstance(value, str):  # 字符串直接输出，避免二次 JSON 转义出现 \"。
-            value_text = value.replace("\n", "\\n")  # 仅把换行转义成 \n，防止打断单行日志。
-        elif isinstance(value, (int, float, bool)) or value is None:  # 基础标量类型用 str 即可。
-            value_text = str(value)  # 基础类型转字符串，输出简洁可读。
-        else:  # 复杂对象（dict/list/tuple/自定义对象）再做 JSON 兜底。
-            try:  # 优先把复杂值序列化成 JSON，结构更清晰。
-                value_text = json.dumps(value, ensure_ascii=False)  # 复杂对象保持 JSON 格式输出。
-            except TypeError:  # 如果仍不可 JSON 序列化（例如部分自定义类）。
-                value_text = str(value).replace("\n", "\\n")  # 退化成字符串，保证日志不会报错。
-        extra_pairs.append(f"{key}={value_text}")  # 拼成 key=value 片段，后续统一拼接。
-    if extra_pairs:  # 如果本条日志包含额外字段。
-        message = f"{message} | {' '.join(extra_pairs)}"  # 把额外字段追加到消息尾部。
-    return f"{time_str} | {level:<8} | {name}:{function}:{line} - {message}"  # 返回最终紧凑文本。
+    # 提取毫秒级时间字符串，便于定位问题时间点。
+    time_str = record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    # 读取日志级别名称（INFO/WARNING/ERROR 等）。
+    level = record["level"].name
+    # 读取日志记录器名字（通常是模块路径）。
+    name = record["name"]
+    # 读取函数名，方便快速定位调用点。
+    function = record["function"]
+    # 读取代码行号，便于直接跳转源码。
+    line = record["line"]
+    # 读取日志主消息文本。
+    message = record["message"]
+    # 读取 loguru 的 extra 字段（bind 和 kwargs 都在这里）。
+    extras = record.get("extra", {})
+    # 初始化额外参数字符串列表。
+    extra_pairs: list[str] = []
+    # 按键名排序输出，保证日志顺序稳定可读。
+    for key in sorted(extras):
+        # 跳过内部使用字段，避免递归污染输出。
+        if key == "compact_json":
+            # 当前键处理完后直接看下一个键。
+            continue
+        # 读取当前额外字段的值。
+        value = extras[key]
+        # 字符串直接输出，避免二次 JSON 转义出现 \"。
+        if isinstance(value, str):
+            # 仅把换行转义成 \n，防止打断单行日志。
+            value_text = value.replace("\n", "\\n")
+        # 基础标量类型用 str 即可。
+        elif isinstance(value, (int, float, bool)) or value is None:
+            # 基础类型转字符串，输出简洁可读。
+            value_text = str(value)
+        # 复杂对象（dict/list/tuple/自定义对象）再做 JSON 兜底。
+        else:
+            # 优先把复杂值序列化成 JSON，结构更清晰。
+            try:
+                # 复杂对象保持 JSON 格式输出。
+                value_text = json.dumps(value, ensure_ascii=False)
+            # 如果仍不可 JSON 序列化（例如部分自定义类）。
+            except TypeError:
+                # 退化成字符串，保证日志不会报错。
+                value_text = str(value).replace("\n", "\\n")
+        # 拼成 key=value 片段，后续统一拼接。
+        extra_pairs.append(f"{key}={value_text}")
+    # 如果本条日志包含额外字段。
+    if extra_pairs:
+        # 把额外字段追加到消息尾部。
+        message = f"{message} | {' '.join(extra_pairs)}"
+    # 返回最终紧凑文本。
+    return f"{time_str} | {level:<8} | {name}:{function}:{line} - {message}"
 
 
 def _compact_json_patcher(record: dict) -> None:
@@ -137,15 +165,22 @@ def _compact_json_patcher(record: dict) -> None:
 
 def _resolve_console_sink():
     # Windows noconsole 打包时，sys.stderr/sys.stdout 可能是 None，需要先做可写性探测。
-    stderr_obj = getattr(sys, "stderr", None)  # 读取标准错误对象，可能为 None。
-    if stderr_obj is not None and hasattr(stderr_obj, "write"):  # 优先使用 stderr，避免干扰标准输出。
-        return stderr_obj  # 返回可写 stderr 作为控制台 sink。
+    # 读取标准错误对象，可能为 None。
+    stderr_obj = getattr(sys, "stderr", None)
+    # 优先使用 stderr，避免干扰标准输出。
+    if stderr_obj is not None and hasattr(stderr_obj, "write"):
+        # 返回可写 stderr 作为控制台 sink。
+        return stderr_obj
 
-    stdout_obj = getattr(sys, "stdout", None)  # 兜底读取标准输出对象，可能为 None。
-    if stdout_obj is not None and hasattr(stdout_obj, "write"):  # 若 stdout 可写，则作为控制台 sink。
-        return stdout_obj  # 返回可写 stdout，保证源码运行仍可看到日志。
+    # 兜底读取标准输出对象，可能为 None。
+    stdout_obj = getattr(sys, "stdout", None)
+    # 若 stdout 可写，则作为控制台 sink。
+    if stdout_obj is not None and hasattr(stdout_obj, "write"):
+        # 返回可写 stdout，保证源码运行仍可看到日志。
+        return stdout_obj
 
-    return None  # 两者都不可写时返回 None，让上层跳过控制台 sink 注册。
+    # 两者都不可写时返回 None，让上层跳过控制台 sink 注册。
+    return None
 
 
 def setup_logging(process_role: str, serial: str | None = None) -> None:
@@ -176,8 +211,10 @@ def setup_logging(process_role: str, serial: str | None = None) -> None:
     )
 
     # 终端 JSON（优先 stderr；在 Windows noconsole 打包场景下可能不存在）。
-    console_sink = _resolve_console_sink()  # 先解析可用控制台 sink，避免把 None 传给 loguru。
-    if console_sink is not None:  # 仅在存在可写控制台流时注册控制台输出。
+    # 先解析可用控制台 sink，避免把 None 传给 loguru。
+    console_sink = _resolve_console_sink()
+    # 仅在存在可写控制台流时注册控制台输出。
+    if console_sink is not None:
         logger.add(
             console_sink,
             level=level,

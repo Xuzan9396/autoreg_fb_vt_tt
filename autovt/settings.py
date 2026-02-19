@@ -10,25 +10,32 @@ IMAGES_DIR = PROJECT_ROOT / "images"
 
 def _env_bool(name: str, default: bool) -> bool:
     """读取布尔环境变量：支持 1/true/yes/on。"""
-    raw_value = os.getenv(name)  # 读取环境变量原始字符串。
-    if raw_value is None:  # 环境变量不存在时返回默认值。
+    # 读取环境变量原始字符串。
+    raw_value = os.getenv(name)
+    # 环境变量不存在时返回默认值。
+    if raw_value is None:
         return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}  # 统一按真值集合解析。
+    # 统一按真值集合解析。
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_runtime_data_dir() -> Path:
     """解析运行期数据目录（日志等），确保打包后也有稳定可写路径。"""
-    system_name = platform.system().lower()  # 读取当前系统名称，便于分平台处理目录规则。
-    if system_name == "darwin":  # macOS：统一放到用户 Application Support。
+    # 读取当前系统名称，便于分平台处理目录规则。
+    system_name = platform.system().lower()
+    # macOS：统一放到用户 Application Support。
+    if system_name == "darwin":
         return Path.home() / "Library" / "Application Support" / "AutoVT"
-    if system_name.startswith("win"):  # Windows：优先用 APPDATA，兜底 LOCALAPPDATA。
+    # Windows：优先用 APPDATA，兜底 LOCALAPPDATA。
+    if system_name.startswith("win"):
         appdata = os.environ.get("APPDATA", "").strip()
         if appdata:
             return Path(appdata) / "AutoVT"
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         if local_appdata:
             return Path(local_appdata) / "AutoVT"
-        return Path.home() / "AppData" / "Roaming" / "AutoVT"  # 再兜底常见 Roaming 路径。
+        # 再兜底常见 Roaming 路径。
+        return Path.home() / "AppData" / "Roaming" / "AutoVT"
     # Linux/其他：优先 XDG_STATE_HOME，兜底 ~/.local/state。
     xdg_state_home = os.environ.get("XDG_STATE_HOME", "").strip()
     if xdg_state_home:

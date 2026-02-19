@@ -103,20 +103,28 @@ class SettingsTab:
         ):
             return
         try:
-            self.user_db.get_config_map()  # 先触发默认配置补齐，确保两个 key 都存在。
-            mojiwang_row = self.user_db.get_config(MOJIWANG_RUN_NUM_KEY)  # 读取抹机王轮次配置。
-            retry_row = self.user_db.get_config(STATUS_23_RETRY_MAX_KEY)  # 读取 status=2/3 最大重试次数配置。
+            # 先触发默认配置补齐，确保两个 key 都存在。
+            self.user_db.get_config_map()
+            # 读取抹机王轮次配置。
+            mojiwang_row = self.user_db.get_config(MOJIWANG_RUN_NUM_KEY)
+            # 读取 status=2/3 最大重试次数配置。
+            retry_row = self.user_db.get_config(STATUS_23_RETRY_MAX_KEY)
             if mojiwang_row is None:
                 raise RuntimeError(f"读取配置失败：{MOJIWANG_RUN_NUM_KEY} 不存在")
             if retry_row is None:
                 raise RuntimeError(f"读取配置失败：{STATUS_23_RETRY_MAX_KEY} 不存在")
 
-            self.mojiwang_value_input.value = str(mojiwang_row.get("val", "3"))  # 回填抹机王轮次值。
-            self.status_23_retry_value_input.value = str(retry_row.get("val", "0"))  # 回填 status=2/3 最大重试次数值。
-            self.mojiwang_desc_text.value = str(mojiwang_row.get("desc", MOJIWANG_RUN_NUM_DESC))  # 回填抹机王配置描述文案。
-            self.status_23_retry_desc_text.value = str(retry_row.get("desc", STATUS_23_RETRY_MAX_DESC))  # 回填重试配置描述文案。
+            # 回填抹机王轮次值。
+            self.mojiwang_value_input.value = str(mojiwang_row.get("val", "3"))
+            # 回填 status=2/3 最大重试次数值。
+            self.status_23_retry_value_input.value = str(retry_row.get("val", "0"))
+            # 回填抹机王配置描述文案。
+            self.mojiwang_desc_text.value = str(mojiwang_row.get("desc", MOJIWANG_RUN_NUM_DESC))
+            # 回填重试配置描述文案。
+            self.status_23_retry_desc_text.value = str(retry_row.get("desc", STATUS_23_RETRY_MAX_DESC))
 
-            latest_update_at = max(int(mojiwang_row.get("update_at", 0)), int(retry_row.get("update_at", 0)))  # 取两个配置中较新的更新时间展示在页面。
+            # 取两个配置中较新的更新时间展示在页面。
+            latest_update_at = max(int(mojiwang_row.get("update_at", 0)), int(retry_row.get("update_at", 0)))
             self.config_last_refresh_text.value = f"最近刷新: {format_timestamp(latest_update_at)}"
 
             if source == "manual" and show_toast:
@@ -130,8 +138,10 @@ class SettingsTab:
         """保存 mojiwang_run_num 与 status_23_retry_max_num 配置值。"""
         if not self.mojiwang_value_input or not self.status_23_retry_value_input:
             return
-        mojiwang_raw_value = str(self.mojiwang_value_input.value or "").strip()  # 读取抹机王轮次输入值。
-        retry_raw_value = str(self.status_23_retry_value_input.value or "").strip()  # 读取 status=2/3 最大重试次数输入值。
+        # 读取抹机王轮次输入值。
+        mojiwang_raw_value = str(self.mojiwang_value_input.value or "").strip()
+        # 读取 status=2/3 最大重试次数输入值。
+        retry_raw_value = str(self.status_23_retry_value_input.value or "").strip()
         if mojiwang_raw_value == "":
             self._show_snack("mojiwang_run_num 不能为空，请输入 1 到 100 的整数。")
             return
@@ -139,8 +149,10 @@ class SettingsTab:
             self._show_snack("status_23_retry_max_num 不能为空，请输入 0 到 5 的整数。")
             return
         try:
-            self.user_db.set_config(key=MOJIWANG_RUN_NUM_KEY, val=mojiwang_raw_value, desc=MOJIWANG_RUN_NUM_DESC)  # 保存抹机王轮次配置。
-            self.user_db.set_config(key=STATUS_23_RETRY_MAX_KEY, val=retry_raw_value, desc=STATUS_23_RETRY_MAX_DESC)  # 保存 status=2/3 最大重试次数配置。
+            # 保存抹机王轮次配置。
+            self.user_db.set_config(key=MOJIWANG_RUN_NUM_KEY, val=mojiwang_raw_value, desc=MOJIWANG_RUN_NUM_DESC)
+            # 保存 status=2/3 最大重试次数配置。
+            self.user_db.set_config(key=STATUS_23_RETRY_MAX_KEY, val=retry_raw_value, desc=STATUS_23_RETRY_MAX_DESC)
             self.refresh(source="save", show_toast=False)
             self._show_snack("配置保存成功。")
         except Exception as exc:

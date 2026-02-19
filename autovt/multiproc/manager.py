@@ -7,10 +7,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:  # 尝试导入 psutil，用于实现进程级“即时暂停/恢复”。
-    import psutil  # 导入 psutil，便于直接挂起/恢复 worker 进程。
-except Exception:  # psutil 不可用时降级回原有命令队列模式。
-    psutil = None  # 标记为 None，后续分支里自动走兼容逻辑。
+# 尝试导入 psutil，用于实现进程级“即时暂停/恢复”。
+try:
+    # 导入 psutil，便于直接挂起/恢复 worker 进程。
+    import psutil
+# psutil 不可用时降级回原有命令队列模式。
+except Exception:
+    # 标记为 None，后续分支里自动走兼容逻辑。
+    psutil = None
 
 from autovt.adb import list_online_serials
 from autovt.logs import get_logger
@@ -19,19 +23,27 @@ from autovt.settings import WORKER_STOP_FORCE_TIMEOUT_SEC, WORKER_STOP_GRACE_TIM
 from autovt.userdb import UserDB
 
 log = get_logger("manager")
-WORKER_STARTUP_PROBE_SEC = 0.4  # 启动探针等待秒数：用于识别“启动即退出”的秒退进程。
+# 启动探针等待秒数：用于识别“启动即退出”的秒退进程。
+WORKER_STARTUP_PROBE_SEC = 0.4
 
 
 def _ensure_spawn_pythonpath() -> None:
     """确保 spawn 子进程可导入 autovt 包。"""
-    app_root = Path(__file__).resolve().parents[2]  # 解析应用根目录（包含 autovt 包的上一级）。
-    app_root_text = str(app_root)  # 转成字符串，便于写入环境变量。
-    old_pythonpath = os.environ.get("PYTHONPATH", "")  # 读取当前 PYTHONPATH（可能为空）。
-    parts = [part for part in old_pythonpath.split(os.pathsep) if part.strip()]  # 拆分并清洗已有路径列表。
-    if app_root_text in parts:  # 已存在时无需重复写入。
+    # 解析应用根目录（包含 autovt 包的上一级）。
+    app_root = Path(__file__).resolve().parents[2]
+    # 转成字符串，便于写入环境变量。
+    app_root_text = str(app_root)
+    # 读取当前 PYTHONPATH（可能为空）。
+    old_pythonpath = os.environ.get("PYTHONPATH", "")
+    # 拆分并清洗已有路径列表。
+    parts = [part for part in old_pythonpath.split(os.pathsep) if part.strip()]
+    # 已存在时无需重复写入。
+    if app_root_text in parts:
         return
-    new_parts = [app_root_text, *parts]  # 把应用根目录放在最前面，保证优先导入本项目代码。
-    os.environ["PYTHONPATH"] = os.pathsep.join(new_parts)  # 回写新的 PYTHONPATH，供后续 spawn 子进程继承。
+    # 把应用根目录放在最前面，保证优先导入本项目代码。
+    new_parts = [app_root_text, *parts]
+    # 回写新的 PYTHONPATH，供后续 spawn 子进程继承。
+    os.environ["PYTHONPATH"] = os.pathsep.join(new_parts)
     log.info("已补齐 spawn PYTHONPATH", app_root=app_root_text)
 
 
@@ -55,7 +67,8 @@ class WorkerHandle:
 
 class DeviceProcessManager:
     def __init__(self, loop_interval_sec: float) -> None:
-        _ensure_spawn_pythonpath()  # 先保证子进程 import 路径可用，避免打包态 worker 秒退。
+        # 先保证子进程 import 路径可用，避免打包态 worker 秒退。
+        _ensure_spawn_pythonpath()
 
         # 强制使用 spawn：多平台行为更一致，尤其是 macOS。
         self._ctx = mp.get_context("spawn")
@@ -195,13 +208,19 @@ class DeviceProcessManager:
         # 启动后做一次短探针：如果子进程“秒退”，直接返回失败原因，避免 GUI 误显示“已启动”。
         process.join(WORKER_STARTUP_PROBE_SEC)
         if not process.is_alive():
-            exit_code = process.exitcode if process.exitcode is not None else -1  # 读取退出码，便于定位秒退原因。
-            detail = f"子进程启动后立即退出 exit_code={exit_code}"  # 构造统一失败详情文案。
-            worker = self._workers.get(serial)  # 回读句柄，更新状态快照给 GUI 展示。
+            # 读取退出码，便于定位秒退原因。
+            exit_code = process.exitcode if process.exitcode is not None else -1
+            # 构造统一失败详情文案。
+            detail = f"子进程启动后立即退出 exit_code={exit_code}"
+            # 回读句柄，更新状态快照给 GUI 展示。
+            worker = self._workers.get(serial)
             if worker:
-                worker.last_state = "fatal"  # 秒退统一标记为 fatal，方便前端颜色和文案突出显示。
-                worker.last_detail = detail  # 写入失败详情。
-                worker.updated_at = time.time()  # 更新时间戳，确保 UI 立即刷新到最新状态。
+                # 秒退统一标记为 fatal，方便前端颜色和文案突出显示。
+                worker.last_state = "fatal"
+                # 写入失败详情。
+                worker.last_detail = detail
+                # 更新时间戳，确保 UI 立即刷新到最新状态。
+                worker.updated_at = time.time()
             log.error("子进程启动探针失败", serial=serial, pid=process.pid, exit_code=exit_code)
             return f"{serial}: 启动失败，{detail}"
         return f"{serial}: 启动成功 pid={process.pid}"
@@ -215,32 +234,50 @@ class DeviceProcessManager:
 
     def _try_realtime_pause_resume(self, serial: str, worker: WorkerHandle, command: str) -> str | None:
         # 尝试使用进程级 suspend/resume 实现“尽量即时”的暂停与恢复。
-        if command not in {"pause", "resume"}:  # 只处理 pause/resume，其它命令走原有队列逻辑。
+        # 只处理 pause/resume，其它命令走原有队列逻辑。
+        if command not in {"pause", "resume"}:
             return None
-        if psutil is None:  # psutil 不可用时不做即时控制，回退到队列命令模式。
-            return None
-
-        pid = int(worker.process.pid or -1)  # 读取 worker 进程 PID。
-        if pid <= 0:  # PID 无效时直接回退到队列命令模式。
+        # psutil 不可用时不做即时控制，回退到队列命令模式。
+        if psutil is None:
             return None
 
-        try:  # 获取目标进程对象，后续执行 suspend/resume。
-            proc = psutil.Process(pid)  # 构造 psutil 进程句柄。
-            if command == "pause":  # 即时暂停分支：直接挂起进程。
-                proc.suspend()  # 挂起 worker 进程，当前执行步骤会立即冻结。
-                worker.last_state = "paused"  # 立即更新状态快照，UI 可立刻看到暂停态。
-                worker.last_detail = "已即时暂停（进程挂起）"  # 更新状态详情文案。
-                worker.updated_at = time.time()  # 更新时间戳用于状态列表显示。
-                log.info("即时暂停成功", serial=serial, pid=pid)  # 记录即时暂停日志。
+        # 读取 worker 进程 PID。
+        pid = int(worker.process.pid or -1)
+        # PID 无效时直接回退到队列命令模式。
+        if pid <= 0:
+            return None
+
+        # 获取目标进程对象，后续执行 suspend/resume。
+        try:
+            # 构造 psutil 进程句柄。
+            proc = psutil.Process(pid)
+            # 即时暂停分支：直接挂起进程。
+            if command == "pause":
+                # 挂起 worker 进程，当前执行步骤会立即冻结。
+                proc.suspend()
+                # 立即更新状态快照，UI 可立刻看到暂停态。
+                worker.last_state = "paused"
+                # 更新状态详情文案。
+                worker.last_detail = "已即时暂停（进程挂起）"
+                # 更新时间戳用于状态列表显示。
+                worker.updated_at = time.time()
+                # 记录即时暂停日志。
+                log.info("即时暂停成功", serial=serial, pid=pid)
                 return f"{serial}: 已即时暂停"
 
-            proc.resume()  # 即时恢复分支：恢复被挂起的进程继续执行。
-            worker.last_state = "running"  # 立即更新状态快照为运行中。
-            worker.last_detail = "已即时恢复（进程继续）"  # 更新状态详情文案。
-            worker.updated_at = time.time()  # 更新时间戳用于状态列表显示。
-            log.info("即时恢复成功", serial=serial, pid=pid)  # 记录即时恢复日志。
+            # 即时恢复分支：恢复被挂起的进程继续执行。
+            proc.resume()
+            # 立即更新状态快照为运行中。
+            worker.last_state = "running"
+            # 更新状态详情文案。
+            worker.last_detail = "已即时恢复（进程继续）"
+            # 更新时间戳用于状态列表显示。
+            worker.updated_at = time.time()
+            # 记录即时恢复日志。
+            log.info("即时恢复成功", serial=serial, pid=pid)
             return f"{serial}: 已即时恢复"
-        except Exception as exc:  # 即时控制失败时记录告警并回退到队列命令模式。
+        # 即时控制失败时记录告警并回退到队列命令模式。
+        except Exception as exc:
             log.warning("即时暂停/恢复失败，回退命令队列模式", serial=serial, command=command, error=str(exc))
             return None
 
@@ -253,8 +290,10 @@ class DeviceProcessManager:
             log.warning("发送命令失败，设备未运行", serial=serial, command=command)
             return f"{serial}: 未运行"
 
-        fast_result = self._try_realtime_pause_resume(serial=serial, worker=worker, command=command)  # 优先尝试进程级即时暂停/恢复。
-        if fast_result is not None:  # 命中即时暂停/恢复分支时直接返回结果。
+        # 优先尝试进程级即时暂停/恢复。
+        fast_result = self._try_realtime_pause_resume(serial=serial, worker=worker, command=command)
+        # 命中即时暂停/恢复分支时直接返回结果。
+        if fast_result is not None:
             return fast_result
 
         worker.command_queue.put(command)
@@ -332,7 +371,8 @@ class DeviceProcessManager:
         self.drain_events()
         serials = sorted(self._workers.keys())
         if not serials:
-            return ["当前无运行中的设备进程"]  # 没有可停止进程时返回明确提示，避免 GUI 侧看起来“无反应”。
+            # 没有可停止进程时返回明确提示，避免 GUI 侧看起来“无反应”。
+            return ["当前无运行中的设备进程"]
 
         grace_timeout_sec = (
             max(0.0, float(timeout_sec)) if timeout_sec is not None else WORKER_STOP_GRACE_TIMEOUT_SEC
@@ -445,7 +485,8 @@ class DeviceProcessManager:
         self.drain_events()
         rows: list[dict[str, str | int | float]] = []
         for serial, worker in sorted(self._workers.items()):
-            user_row = self.user_db.get_user_by_device(serial)  # 从 t_user.device 反查当前设备占用账号。
+            # 从 t_user.device 反查当前设备占用账号。
+            user_row = self.user_db.get_user_by_device(serial)
             email_account = str(user_row.get("email_account", "")).strip() if user_row else ""
             rows.append(
                 {

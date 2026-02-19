@@ -13,7 +13,8 @@ import flet as ft
 LOGIN_USERNAME = "admin"
 LOGIN_PASSWORD = "123456"
 DEVICE_MONITOR_INTERVAL_SEC = 2.0
-ACCOUNT_PAGE_SIZE = 20  # 账号列表每页条数（固定 20，和需求保持一致）。
+# 账号列表每页条数（固定 20，和需求保持一致）。
+ACCOUNT_PAGE_SIZE = 20
 MOJIWANG_RUN_NUM_KEY = "mojiwang_run_num"
 MOJIWANG_RUN_NUM_DESC = "抹机玩抹机次数: 1 到 100 填写值"
 STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
@@ -59,28 +60,47 @@ def state_color(state: str) -> str:
 
 def state_text(state: str) -> str:
     """把设备状态英文值转为中文文案。"""
-    raw_state = str(state or "").strip()  # 读取原始状态并清理空白字符，避免异常值影响展示。
-    state_key = raw_state.lower()  # 统一转小写做映射匹配，兼容状态值大小写差异。
-    text_map = {  # 状态文案映射表（英文状态 -> 中文展示）。
-        "ready": "就绪",  # 初始化完成。
-        "running": "运行中",  # 正在执行任务。
-        "paused": "暂停中",  # 已暂停。
-        "recovering": "恢复中",  # 正在恢复运行时。
-        "warning": "警告",  # 业务可恢复警告态。
-        "error": "异常",  # 普通错误态。
-        "fatal": "致命错误",  # 致命错误态。
-        "stopping": "停止中",  # 正在停止。
-        "stopped": "已停止",  # 已停止。
-        "waiting": "等待账号",  # 无可用账号，等待新数据。
-        "unknown": "未知",  # 未知状态。
-        "idle": "空闲",  # 空闲未执行。
-        "starting": "启动中",  # 启动过程中。
+    # 读取原始状态并清理空白字符，避免异常值影响展示。
+    raw_state = str(state or "").strip()
+    # 统一转小写做映射匹配，兼容状态值大小写差异。
+    state_key = raw_state.lower()
+    # 状态文案映射表（英文状态 -> 中文展示）。
+    text_map = {
+        # 初始化完成。
+        "ready": "就绪",
+        # 正在执行任务。
+        "running": "运行中",
+        # 已暂停。
+        "paused": "暂停中",
+        # 正在恢复运行时。
+        "recovering": "恢复中",
+        # 业务可恢复警告态。
+        "warning": "警告",
+        # 普通错误态。
+        "error": "异常",
+        # 致命错误态。
+        "fatal": "致命错误",
+        # 正在停止。
+        "stopping": "停止中",
+        # 已停止。
+        "stopped": "已停止",
+        # 无可用账号，等待新数据。
+        "waiting": "等待账号",
+        # 未知状态。
+        "unknown": "未知",
+        # 空闲未执行。
+        "idle": "空闲",
+        # 启动过程中。
+        "starting": "启动中",
     }
-    if state_key in text_map:  # 命中已知状态映射时直接返回中文文案。
+    # 命中已知状态映射时直接返回中文文案。
+    if state_key in text_map:
         return text_map[state_key]
-    if raw_state == "":  # 空状态时返回占位符，避免显示空白标签。
+    # 空状态时返回占位符，避免显示空白标签。
+    if raw_state == "":
         return "-"
-    return raw_state  # 非空但未知状态时原样返回，便于排查新状态值。
+    # 非空但未知状态时原样返回，便于排查新状态值。
+    return raw_state
 
 
 def register_status_text(value: int) -> str:

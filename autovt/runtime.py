@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 from autovt.adb import build_device_uri, ensure_adb_environment
@@ -29,7 +30,8 @@ def setup_device(serial: str, script_file: str, log_subdir: str) -> None:
     # Airtest import 时会改动 logger 级别，这里导入后立即重置一次策略。
     airtest_debug = apply_third_party_log_policy()
     log.info("已应用第三方日志策略", airtest_debug=airtest_debug)
-    ST.SAVE_IMAGE = bool(AIRTEST_SAVE_IMAGE)  # 控制 Airtest 是否保存动作截图文件。
+    # 控制 Airtest 是否保存动作截图文件。
+    ST.SAVE_IMAGE = bool(AIRTEST_SAVE_IMAGE)
     log.info("已应用 Airtest 截图保存策略", save_image=ST.SAVE_IMAGE)
 
     if len(sys.argv) > 1:
@@ -54,12 +56,20 @@ def setup_device(serial: str, script_file: str, log_subdir: str) -> None:
     # 2) 指定日志目录
     # 3) 只连接本进程负责的这一台设备
     # 4) 指定项目根目录（便于资源定位）
+    # 显式注入 adb_path，避免 Airtest 误用外部常驻 adb。
+    device_uri = build_device_uri(serial, adb_path=resolved_adb)
+    # 记录初始化开始时间，便于定位慢点是否发生在 auto_setup。
+    setup_start_ts = time.monotonic()
+    log.info("开始执行 Airtest auto_setup", serial=serial, device_uri=device_uri)
     auto_setup(
         script_file,
         logdir=str(log_dir),
-        devices=[build_device_uri(serial)],
+        devices=[device_uri],
         project_root=str(PROJECT_ROOT),
     )
+    # 统计 auto_setup 耗时毫秒值，便于后续分析阻塞点。
+    setup_cost_ms = int((time.monotonic() - setup_start_ts) * 1000)
+    log.info("Airtest auto_setup 执行完成", serial=serial, elapsed_ms=setup_cost_ms)
     # 当前进程内只连一台设备，索引固定是 0。
     set_current(0)
     log.info("设备初始化完成", serial=serial, log_dir=str(log_dir))
@@ -70,15 +80,21 @@ def create_poco() -> Any:
     from poco.drivers.android.uiautomation import AndroidUiautomationPoco
 
     global _POCO_INSTANCE
+    # 记录 Poco 初始化起点，方便区分卡在设备连接还是 Poco 启动阶段。
+    init_start_ts = time.monotonic()
     # 创建 Poco 驱动实例，后续任务里就能进行控件级操作。
     _POCO_INSTANCE = AndroidUiautomationPoco(
         use_airtest_input=True,
-        screenshot_each_action=bool(POCO_SCREENSHOT_EACH_ACTION),  # 控制 Poco 每步动作后是否自动截图。
+        # 控制 Poco 每步动作后是否自动截图。
+        screenshot_each_action=bool(POCO_SCREENSHOT_EACH_ACTION),
     )
+    # 统计 Poco 初始化耗时，帮助发现偶发启动慢问题。
+    init_cost_ms = int((time.monotonic() - init_start_ts) * 1000)
     log.info(
         "Poco 初始化完成",
         poco_type=type(_POCO_INSTANCE).__name__,
         screenshot_each_action=bool(POCO_SCREENSHOT_EACH_ACTION),
+        elapsed_ms=init_cost_ms,
     )
     return _POCO_INSTANCE
 

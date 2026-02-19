@@ -75,13 +75,16 @@ class LoginView:
         self.page.add(
             ft.Container(
                 expand=True,
-                bgcolor=ft.Colors.BLUE_GREY_50,  # 登录页与主控台统一背景色，避免出现“手机模式”割裂感。
-                padding=ft.padding.symmetric(horizontal=24, vertical=12),  # 增加外层留白，让桌面布局更协调。
+                # 登录页与主控台统一背景色，避免出现“手机模式”割裂感。
+                bgcolor=ft.Colors.BLUE_GREY_50,
+                # 增加外层留白，让桌面布局更协调。
+                padding=ft.padding.symmetric(horizontal=24, vertical=12),
                 content=ft.Column(
                     expand=True,
                     spacing=8,
                     controls=[
-                        ft.Row(  # 顶部标题行样式与主控台一致，保持视觉统一。
+                        # 顶部标题行样式与主控台一致，保持视觉统一。
+                        ft.Row(
                             controls=[
                                 ft.Text("主控台", size=26, weight=ft.FontWeight.W_700, color=ft.Colors.BLUE_GREY_900),
                                 ft.Text("自动注册 facebook, vinted, tiktok", size=13, color=ft.Colors.BLUE_GREY_700),
@@ -90,7 +93,8 @@ class LoginView:
                         ),
                         ft.Container(
                             expand=True,
-                            alignment=ft.Alignment(0, -0.08),  # 让登录卡片略微靠上，贴近后台登录页常见布局。
+                            # 让登录卡片略微靠上，贴近后台登录页常见布局。
+                            alignment=ft.Alignment(0, -0.08),
                             content=login_card,
                         ),
                     ],

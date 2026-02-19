@@ -26,35 +26,59 @@ from autovt.userdb import (
 
 
 def _normalize_locale(raw: str) -> str:
-    value = (raw or "").strip()  # 清理原始字符串，避免空格和换行干扰判断。
-    if not value or value.lower() in {"null", "none"}:  # 空值或无效占位值统一归一为 unknown。
-        return "unknown"  # 返回 unknown，表示本次未识别出有效语言。
-    value = value.replace("_", "-")  # 把 en_US 这种下划线格式转换为 en-US 统一格式。
-    if "," in value:  # 如果是多语言串（例如 en-US,zh-CN），优先取第一项。
-        value = value.split(",", 1)[0].strip()  # 截取第一个语言并清理空格。
-    return value  # 返回归一化后的语言值。
+    # 清理原始字符串，避免空格和换行干扰判断。
+    value = (raw or "").strip()
+    # 空值或无效占位值统一归一为 unknown。
+    if not value or value.lower() in {"null", "none"}:
+        # 返回 unknown，表示本次未识别出有效语言。
+        return "unknown"
+    # 把 en_US 这种下划线格式转换为 en-US 统一格式。
+    value = value.replace("_", "-")
+    # 如果是多语言串（例如 en-US,zh-CN），优先取第一项。
+    if "," in value:
+        # 截取第一个语言并清理空格。
+        value = value.split(",", 1)[0].strip()
+    # 返回归一化后的语言值。
+    return value
 
 
 def _read_device_locale(log) -> str:
-    try:  # 读取设备语言属于运行期能力，放到 try 里避免影响主流程。
-        from airtest.core.api import device  # 延迟导入 device，避免主进程加载 airtest 依赖。
+    # 读取设备语言属于运行期能力，放到 try 里避免影响主流程。
+    try:
+        # 延迟导入 device，避免主进程加载 airtest 依赖。
+        from airtest.core.api import device
 
-        adb = device().adb  # 从当前进程已连接设备里拿到 adb 客户端。
-        candidates = [  # 依次尝试多个系统字段，提高不同 ROM 兼容性。
-            "settings get system system_locales",  # Android 新版常用多语言字段。
-            "getprop persist.sys.locale",  # 厂商 ROM 常见持久化字段。
-            "getprop ro.product.locale",  # 部分设备只提供只读 locale 字段。
+        # 从当前进程已连接设备里拿到 adb 客户端。
+        adb = device().adb
+        # 依次尝试多个系统字段，提高不同 ROM 兼容性。
+        candidates = [
+            # Android 新版常用多语言字段。
+            "settings get system system_locales",
+            # 厂商 ROM 常见持久化字段。
+            "getprop persist.sys.locale",
+            # 部分设备只提供只读 locale 字段。
+            "getprop ro.product.locale",
         ]
-        for cmd in candidates:  # 逐个命令尝试读取语言。
-            raw = str(adb.shell(cmd)).strip()  # 执行 adb shell 并转成字符串结果。
-            locale = _normalize_locale(raw)  # 对读取结果做标准化处理。
-            if locale != "unknown":  # 命中有效语言时立即返回。
-                log.info("识别到设备语言", locale=locale, cmd=cmd)  # 记录本次命中来源和语言值。
-                return locale  # 返回识别到的语言。
-    except Exception as exc:  # 读取中任意异常都降级为 unknown，不中断 worker。
-        log.warning("读取设备语言失败，使用 unknown", error=str(exc))  # 记录降级原因，便于排查。
-    log.warning("未识别到有效设备语言，使用 unknown")  # 三个字段都未命中时记录提示日志。
-    return "unknown"  # 返回 unknown 作为统一降级值。
+        # 逐个命令尝试读取语言。
+        for cmd in candidates:
+            # 执行 adb shell 并转成字符串结果。
+            raw = str(adb.shell(cmd)).strip()
+            # 对读取结果做标准化处理。
+            locale = _normalize_locale(raw)
+            # 命中有效语言时立即返回。
+            if locale != "unknown":
+                # 记录本次命中来源和语言值。
+                log.info("识别到设备语言", locale=locale, cmd=cmd)
+                # 返回识别到的语言。
+                return locale
+    # 读取中任意异常都降级为 unknown，不中断 worker。
+    except Exception as exc:
+        # 记录降级原因，便于排查。
+        log.warning("读取设备语言失败，使用 unknown", error=str(exc))
+    # 三个字段都未命中时记录提示日志。
+    log.warning("未识别到有效设备语言，使用 unknown")
+    # 返回 unknown 作为统一降级值。
+    return "unknown"
 
 
 def _build_task_context(
@@ -79,7 +103,8 @@ def _emit(queue_out: mp.Queue, serial: str, state: str, detail: str, **extra: An
         "time": time.time(),
     }
     if extra:
-        event.update(extra)  # 允许附带扩展字段（例如 email_account），主进程可按需使用。
+        # 允许附带扩展字段（例如 email_account），主进程可按需使用。
+        event.update(extra)
     try:
         queue_out.put(event)
     except Exception:
@@ -96,16 +121,26 @@ def _sleep_with_stop(stop_event: mp.Event, sec: float) -> None:
 
 def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
     # 从 t_config 映射读取“status=2/3 同账号最大重试次数”配置，并做 0~5 边界保护。
-    raw_value = str(config_map.get(STATUS_23_RETRY_MAX_KEY, STATUS_23_RETRY_MAX_DEFAULT)).strip()  # 读取配置原始值，缺失时回退默认值 0。
-    try:  # 尝试解析整数。
-        parsed_value = int(raw_value)  # 转成整数，便于后续范围校验。
-    except Exception:  # 非法值（如空串或非数字）时回退默认值。
-        return int(STATUS_23_RETRY_MAX_DEFAULT)  # 返回默认值 0（不重试）。
-    if parsed_value < STATUS_23_RETRY_MIN:  # 小于最小值时回退下限。
-        return STATUS_23_RETRY_MIN  # 返回最小值 0。
-    if parsed_value > STATUS_23_RETRY_MAX:  # 大于最大值时截断到上限。
-        return STATUS_23_RETRY_MAX  # 返回最大值 5。
-    return parsed_value  # 返回合法重试次数。
+    # 读取配置原始值，缺失时回退默认值 0。
+    raw_value = str(config_map.get(STATUS_23_RETRY_MAX_KEY, STATUS_23_RETRY_MAX_DEFAULT)).strip()
+    # 尝试解析整数。
+    try:
+        # 转成整数，便于后续范围校验。
+        parsed_value = int(raw_value)
+    # 非法值（如空串或非数字）时回退默认值。
+    except Exception:
+        # 返回默认值 0（不重试）。
+        return int(STATUS_23_RETRY_MAX_DEFAULT)
+    # 小于最小值时回退下限。
+    if parsed_value < STATUS_23_RETRY_MIN:
+        # 返回最小值 0。
+        return STATUS_23_RETRY_MIN
+    # 大于最大值时截断到上限。
+    if parsed_value > STATUS_23_RETRY_MAX:
+        # 返回最大值 5。
+        return STATUS_23_RETRY_MAX
+    # 返回合法重试次数。
+    return parsed_value
 
 
 def _is_retryable_runtime_error(exc: Exception, airtest_errors: dict[str, Any]) -> bool:
@@ -325,33 +360,53 @@ def worker_main(
 
     # 延迟加载 Airtest 异常类型映射。
     airtest_errors = _load_airtest_error_types()
-    task_context = _build_task_context(serial=serial, locale="unknown")  # 子进程内缓存任务上下文对象。
+    # 子进程内缓存任务上下文对象。
+    task_context = _build_task_context(serial=serial, locale="unknown")
 
-    assigned_user: dict[str, Any] | None = None  # 当前设备绑定的一条账号记录。
-    assigned_status_23_retry_count = 0  # 记录当前账号在 status=2/3 下已执行的重试次数。
-    waiting_for_user = False  # 标记是否处于“无可用账号等待中”，避免重复刷屏日志。
+    # 当前设备绑定的一条账号记录。
+    assigned_user: dict[str, Any] | None = None
+    # 记录当前账号在 status=2/3 下已执行的重试次数。
+    assigned_status_23_retry_count = 0
+    # 标记是否处于“无可用账号等待中”，避免重复刷屏日志。
+    waiting_for_user = False
 
     def _ensure_assigned_user(config_map: dict[str, str]) -> dict[str, Any] | None:
         """确保当前设备拿到一条可运行账号（status=1），并支持 status=2/3 同账号重试。"""
         nonlocal assigned_user, assigned_status_23_retry_count
 
-        retry_limit = _read_status_23_retry_limit(config_map)  # 读取 status=2/3 同账号最大重试次数配置。
+        # 读取 status=2/3 同账号最大重试次数配置。
+        retry_limit = _read_status_23_retry_limit(config_map)
 
-        if assigned_user is not None:  # 优先刷新当前内存账号，避免每轮重复抢占。
-            user_id = int(assigned_user.get("id", 0))  # 读取当前内存账号主键。
-            latest = user_db.get_user_by_id(user_id) if user_id > 0 else None  # 从数据库读取最新账号状态。
-            if latest is not None and str(latest.get("device", "")).strip() == serial:  # 账号仍绑定到当前设备时继续判断状态。
-                current_status = int(latest.get("status", 0))  # 读取数据库中的最新 status。
-                email_account = str(latest.get("email_account", "")).strip()  # 读取邮箱用于日志追踪。
-                if current_status == 1:  # status=1 表示“仍在使用中”，继续跑同一个账号，不切换。
-                    assigned_user = dict(latest)  # 更新本地缓存为最新记录。
-                    assigned_status_23_retry_count = 0  # 回到运行中时清空 2/3 重试计数。
-                    return assigned_user  # 返回当前账号，继续执行任务。
-                if current_status in {2, 3}:  # status=2/3 时按配置决定是否继续同账号重试。
-                    if assigned_status_23_retry_count < retry_limit:  # 未超过最大重试次数时继续复用同账号。
-                        assigned_status_23_retry_count += 1  # 进入一次新的重试轮次并累加计数。
-                        assigned_user = dict(latest)  # 更新本地缓存为最新记录。
-                        log.info(  # 记录“同账号重试”日志，便于排查。
+        # 优先刷新当前内存账号，避免每轮重复抢占。
+        if assigned_user is not None:
+            # 读取当前内存账号主键。
+            user_id = int(assigned_user.get("id", 0))
+            # 从数据库读取最新账号状态。
+            latest = user_db.get_user_by_id(user_id) if user_id > 0 else None
+            # 账号仍绑定到当前设备时继续判断状态。
+            if latest is not None and str(latest.get("device", "")).strip() == serial:
+                # 读取数据库中的最新 status。
+                current_status = int(latest.get("status", 0))
+                # 读取邮箱用于日志追踪。
+                email_account = str(latest.get("email_account", "")).strip()
+                # status=1 表示“仍在使用中”，继续跑同一个账号，不切换。
+                if current_status == 1:
+                    # 更新本地缓存为最新记录。
+                    assigned_user = dict(latest)
+                    # 回到运行中时清空 2/3 重试计数。
+                    assigned_status_23_retry_count = 0
+                    # 返回当前账号，继续执行任务。
+                    return assigned_user
+                # status=2/3 时按配置决定是否继续同账号重试。
+                if current_status in {2, 3}:
+                    # 未超过最大重试次数时继续复用同账号。
+                    if assigned_status_23_retry_count < retry_limit:
+                        # 进入一次新的重试轮次并累加计数。
+                        assigned_status_23_retry_count += 1
+                        # 更新本地缓存为最新记录。
+                        assigned_user = dict(latest)
+                        # 记录“同账号重试”日志，便于排查。
+                        log.info(
                             "账号状态为 2/3，继续复用当前账号重试",
                             serial=serial,
                             user_id=user_id,
@@ -360,9 +415,12 @@ def worker_main(
                             retry_index=assigned_status_23_retry_count,
                             retry_limit=retry_limit,
                         )
-                        return assigned_user  # 返回当前账号，让任务继续重试。
-                    user_db.clear_device_by_user_id(user_id)  # 重试达到上限时释放设备绑定，准备切换新账号。
-                    log.info(  # 记录释放日志，明确为什么切账号。
+                        # 返回当前账号，让任务继续重试。
+                        return assigned_user
+                    # 重试达到上限时释放设备绑定，准备切换新账号。
+                    user_db.clear_device_by_user_id(user_id)
+                    # 记录释放日志，明确为什么切账号。
+                    log.info(
                         "账号状态为 2/3 且重试已达上限，释放设备绑定",
                         serial=serial,
                         user_id=user_id,
@@ -371,10 +429,14 @@ def worker_main(
                         retry_count=assigned_status_23_retry_count,
                         retry_limit=retry_limit,
                     )
-                    assigned_user = None  # 清空当前账号缓存。
-                    assigned_status_23_retry_count = 0  # 清空当前账号的重试计数。
-                else:  # 其他状态视为不可运行，释放绑定后重新分配。
-                    user_db.clear_device_by_user_id(user_id)  # 清空设备绑定，避免遗留占用。
+                    # 清空当前账号缓存。
+                    assigned_user = None
+                    # 清空当前账号的重试计数。
+                    assigned_status_23_retry_count = 0
+                # 其他状态视为不可运行，释放绑定后重新分配。
+                else:
+                    # 清空设备绑定，避免遗留占用。
+                    user_db.clear_device_by_user_id(user_id)
                     log.info(
                         "当前账号状态不可运行，释放设备绑定",
                         serial=serial,
@@ -382,26 +444,44 @@ def worker_main(
                         status=current_status,
                         email_account=email_account,
                     )
-                    assigned_user = None  # 清空当前账号缓存。
-                    assigned_status_23_retry_count = 0  # 清空重试计数。
-            else:  # 当前缓存账号已不在本设备上，清空本地缓存并重新领取。
-                assigned_user = None  # 清空当前账号缓存。
-                assigned_status_23_retry_count = 0  # 清空重试计数，避免串到下一条账号。
+                    # 清空当前账号缓存。
+                    assigned_user = None
+                    # 清空重试计数。
+                    assigned_status_23_retry_count = 0
+            # 当前缓存账号已不在本设备上，清空本地缓存并重新领取。
+            else:
+                # 清空当前账号缓存。
+                assigned_user = None
+                # 清空重试计数，避免串到下一条账号。
+                assigned_status_23_retry_count = 0
 
         # 兜底：检查数据库里是否仍有绑定到本设备的账号（可能来自进程重启恢复）。
-        bound_row = user_db.get_user_by_device(serial)  # 按设备反查当前绑定账号。
-        if bound_row is not None:  # 存在绑定账号时按状态分支处理。
-            bound_user_id = int(bound_row.get("id", 0))  # 读取绑定账号主键。
-            bound_status = int(bound_row.get("status", 0))  # 读取绑定账号状态。
-            bound_email = str(bound_row.get("email_account", "")).strip()  # 读取绑定邮箱用于日志追踪。
-            if bound_status == 1:  # 绑定且运行中时直接复用。
-                assigned_user = dict(bound_row)  # 写回当前账号缓存。
-                assigned_status_23_retry_count = 0  # 清空 2/3 重试计数。
-                return assigned_user  # 返回绑定账号。
-            if bound_status in {2, 3}:  # 绑定账号处于 2/3 状态时按配置决定是否继续同账号重试。
-                if assigned_status_23_retry_count < retry_limit:  # 未超过上限则继续同账号重试。
-                    assigned_status_23_retry_count += 1  # 累加重试次数。
-                    assigned_user = dict(bound_row)  # 写回当前账号缓存。
+        # 按设备反查当前绑定账号。
+        bound_row = user_db.get_user_by_device(serial)
+        # 存在绑定账号时按状态分支处理。
+        if bound_row is not None:
+            # 读取绑定账号主键。
+            bound_user_id = int(bound_row.get("id", 0))
+            # 读取绑定账号状态。
+            bound_status = int(bound_row.get("status", 0))
+            # 读取绑定邮箱用于日志追踪。
+            bound_email = str(bound_row.get("email_account", "")).strip()
+            # 绑定且运行中时直接复用。
+            if bound_status == 1:
+                # 写回当前账号缓存。
+                assigned_user = dict(bound_row)
+                # 清空 2/3 重试计数。
+                assigned_status_23_retry_count = 0
+                # 返回绑定账号。
+                return assigned_user
+            # 绑定账号处于 2/3 状态时按配置决定是否继续同账号重试。
+            if bound_status in {2, 3}:
+                # 未超过上限则继续同账号重试。
+                if assigned_status_23_retry_count < retry_limit:
+                    # 累加重试次数。
+                    assigned_status_23_retry_count += 1
+                    # 写回当前账号缓存。
+                    assigned_user = dict(bound_row)
                     log.info(
                         "发现设备绑定账号处于 2/3，继续复用当前账号重试",
                         serial=serial,
@@ -411,8 +491,10 @@ def worker_main(
                         retry_index=assigned_status_23_retry_count,
                         retry_limit=retry_limit,
                     )
-                    return assigned_user  # 返回绑定账号进入重试。
-                user_db.clear_device_by_user_id(bound_user_id)  # 达上限后释放绑定，允许分配新账号。
+                    # 返回绑定账号进入重试。
+                    return assigned_user
+                # 达上限后释放绑定，允许分配新账号。
+                user_db.clear_device_by_user_id(bound_user_id)
                 log.info(
                     "设备绑定账号处于 2/3 且重试达上限，释放绑定等待新账号",
                     serial=serial,
@@ -422,10 +504,14 @@ def worker_main(
                     retry_count=assigned_status_23_retry_count,
                     retry_limit=retry_limit,
                 )
-                assigned_status_23_retry_count = 0  # 重试结束后重置计数器。
-                assigned_user = None  # 清空账号缓存，进入新分配流程。
-            else:  # 非 1/2/3 状态绑定视为遗留，先清掉 device 再参与新分配。
-                user_db.clear_device_by_user_id(bound_user_id)  # 清理遗留绑定。
+                # 重试结束后重置计数器。
+                assigned_status_23_retry_count = 0
+                # 清空账号缓存，进入新分配流程。
+                assigned_user = None
+            # 非 1/2/3 状态绑定视为遗留，先清掉 device 再参与新分配。
+            else:
+                # 清理遗留绑定。
+                user_db.clear_device_by_user_id(bound_user_id)
                 log.info(
                     "清理设备遗留绑定",
                     serial=serial,
@@ -433,33 +519,44 @@ def worker_main(
                     status=bound_status,
                     email_account=bound_email,
                 )
-                assigned_status_23_retry_count = 0  # 清空计数器。
-                assigned_user = None  # 清空缓存。
+                # 清空计数器。
+                assigned_status_23_retry_count = 0
+                # 清空缓存。
+                assigned_user = None
 
         # 核心分配：事务加锁领取一条 status=0 的账号，并置为 status=1 + device=serial。
-        assigned_user = user_db.claim_user_for_device(serial)  # 尝试领取一条未使用账号。
-        if assigned_user is None:  # 没有可分配账号时返回空，让上层进入等待态。
+        # 尝试领取一条未使用账号。
+        assigned_user = user_db.claim_user_for_device(serial)
+        # 没有可分配账号时返回空，让上层进入等待态。
+        if assigned_user is None:
             return None
-        assigned_user = dict(assigned_user)  # 把 sqlite Row 转成字典缓存。
-        assigned_status_23_retry_count = 0  # 新账号分配成功后重置重试计数。
-        return assigned_user  # 返回新分配账号。
+        # 把 sqlite Row 转成字典缓存。
+        assigned_user = dict(assigned_user)
+        # 新账号分配成功后重置重试计数。
+        assigned_status_23_retry_count = 0
+        # 返回新分配账号。
+        return assigned_user
 
     def _prepare_task_context() -> TaskContext | None:
         """为本轮执行准备任务上下文：注入一条 t_user + 全量 t_config 映射。"""
         nonlocal waiting_for_user, task_context
 
         try:
-            config_map = user_db.get_config_map()  # 读取 t_config 全量 key->val 映射（内部会补默认值）。
+            # 读取 t_config 全量 key->val 映射（内部会补默认值）。
+            config_map = user_db.get_config_map()
         except Exception as exc:
             # 配置读取失败时回退默认值，保证 worker 不中断。
             config_map = {
                 "mojiwang_run_num": "3",
                 STATUS_23_RETRY_MAX_KEY: STATUS_23_RETRY_MAX_DEFAULT,
-            }  # 回退默认配置，确保任务循环可继续运行。
+            # 回退默认配置，确保任务循环可继续运行。
+            }
             log.exception("读取 t_config 失败，使用默认配置", error=str(exc), fallback_config=config_map)
 
-        current_user = _ensure_assigned_user(config_map)  # 结合配置（含重试次数）拿到当前可运行账号。
-        if current_user is None:  # 无可用账号时进入等待态，不执行任务。
+        # 结合配置（含重试次数）拿到当前可运行账号。
+        current_user = _ensure_assigned_user(config_map)
+        # 无可用账号时进入等待态，不执行任务。
+        if current_user is None:
             if not waiting_for_user:
                 _emit(event_queue, serial, "waiting", "无可用账号(status=0) 或重试结束，等待中")
                 log.info("无可用账号(status=0) 或重试结束，worker 进入等待", serial=serial)
@@ -471,14 +568,16 @@ def worker_main(
         task_context.config_map = {str(k): str(v) for k, v in config_map.items()}
 
         email_account = str(current_user.get("email_account", "")).strip()
-        if waiting_for_user:  # 从等待态恢复时上报一次“已拿到账号”。
+        # 从等待态恢复时上报一次“已拿到账号”。
+        if waiting_for_user:
             _emit(event_queue, serial, "running", f"已分配账号: {email_account or '-'}", email_account=email_account)
             log.info("等待结束，已分配账号", serial=serial, email_account=email_account)
         waiting_for_user = False
         return task_context
 
     def reinit_runtime() -> bool:
-        nonlocal task_context  # 需要修改外层 task_context 缓存变量。
+        # 需要修改外层 task_context 缓存变量。
+        nonlocal task_context
         ok = _init_runtime_with_retry(
             serial=serial,
             stop_event=stop_event,
@@ -487,29 +586,41 @@ def worker_main(
             setup_device=setup_device,
             create_poco=create_poco,
         )
-        if ok:  # 只有初始化成功时才读取一次设备语言。
-            locale = _read_device_locale(log)  # 读取本设备当前语言。
+        # 只有初始化成功时才读取一次设备语言。
+        if ok:
+            # 读取本设备当前语言。
+            locale = _read_device_locale(log)
             task_context = _build_task_context(
                 serial=serial,
                 locale=locale,
                 user_info=task_context.user_info,
                 config_map=task_context.config_map,
-            )  # 更新子进程上下文缓存，保留账号和配置信息。
-            try:  # 严格校验上下文字段，缺失时直接判定为致命错误并停止子进程。
-                task_context.ensure_required()  # 强制要求 serial/device_locale/device_lang 都是有效值。
-            except Exception as exc:  # 校验失败时进入致命分支。
-                detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()  # 格式化异常摘要便于日志和事件上报。
-                _emit(event_queue, serial, "fatal", f"任务上下文无效，停止 worker: {detail}")  # 向主进程上报 fatal 状态。
-                log.error(  # 记录上下文校验失败详情，便于快速定位问题。
+            # 更新子进程上下文缓存，保留账号和配置信息。
+            )
+            # 严格校验上下文字段，缺失时直接判定为致命错误并停止子进程。
+            try:
+                # 强制要求 serial/device_locale/device_lang 都是有效值。
+                task_context.ensure_required()
+            # 校验失败时进入致命分支。
+            except Exception as exc:
+                # 格式化异常摘要便于日志和事件上报。
+                detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+                # 向主进程上报 fatal 状态。
+                _emit(event_queue, serial, "fatal", f"任务上下文无效，停止 worker: {detail}")
+                # 记录上下文校验失败详情，便于快速定位问题。
+                log.error(
                     "任务上下文校验失败，停止 worker",
                     serial=task_context.serial,
                     device_locale=task_context.device_locale,
                     device_lang=task_context.device_lang,
                     error=detail,
                 )
-                stop_event.set()  # 设置停止信号，通知主循环尽快退出。
-                return False  # 返回 False，调用方会走 worker 退出路径。
-            log.info(  # 打日志确认上下文缓存变更。
+                # 设置停止信号，通知主循环尽快退出。
+                stop_event.set()
+                # 返回 False，调用方会走 worker 退出路径。
+                return False
+            # 打日志确认上下文缓存变更。
+            log.info(
                 "worker 任务上下文已更新",
                 serial=task_context.serial,
                 device_locale=task_context.device_locale,
@@ -568,8 +679,10 @@ def worker_main(
                     continue
 
                 if command == "run_once":
-                    runtime_context = _prepare_task_context()  # 手动执行前先准备账号和配置上下文。
-                    if runtime_context is None:  # 无可用账号时不执行任务。
+                    # 手动执行前先准备账号和配置上下文。
+                    runtime_context = _prepare_task_context()
+                    # 无可用账号时不执行任务。
+                    if runtime_context is None:
                         continue
 
                     email_account = str(runtime_context.user_info.get("email_account", "")).strip()
@@ -615,8 +728,10 @@ def worker_main(
                 _sleep_with_stop(stop_event, 0.2)
                 continue
 
-            runtime_context = _prepare_task_context()  # 自动轮询执行前先准备账号和配置上下文。
-            if runtime_context is None:  # 无可用账号时等待下一轮，不执行任务。
+            # 自动轮询执行前先准备账号和配置上下文。
+            runtime_context = _prepare_task_context()
+            # 无可用账号时等待下一轮，不执行任务。
+            if runtime_context is None:
                 _sleep_with_stop(stop_event, loop_interval_sec)
                 continue
 

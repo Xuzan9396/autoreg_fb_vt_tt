@@ -45,9 +45,12 @@ def _hidden_subprocess_kwargs() -> dict:
 
     # 优先使用 Python 提供的 CREATE_NO_WINDOW 常量；旧环境兜底硬编码值。
     create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-    startupinfo = subprocess.STARTUPINFO()  # 构造 Windows 启动信息对象。
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # 告诉系统使用窗口显示控制标志。
-    startupinfo.wShowWindow = 0  # SW_HIDE：隐藏窗口。
+    # 构造 Windows 启动信息对象。
+    startupinfo = subprocess.STARTUPINFO()
+    # 告诉系统使用窗口显示控制标志。
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    # SW_HIDE：隐藏窗口。
+    startupinfo.wShowWindow = 0
     return {
         "creationflags": create_no_window,
         "startupinfo": startupinfo,
@@ -270,7 +273,8 @@ def list_online_serials() -> list[str]:
             capture_output=True,
             text=True,
             check=True,
-            **_hidden_subprocess_kwargs(),  # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
+            # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
+            **_hidden_subprocess_kwargs(),
         )
         log.debug("执行 adb devices 成功")
     except FileNotFoundError as exc:
@@ -307,19 +311,21 @@ def list_online_serials() -> list[str]:
     return serials
 
 
-def build_device_uri(serial: str) -> str:
+def build_device_uri(serial: str, adb_path: str | None = None) -> str:
     # 按 Airtest 官方格式组装设备 URI（包含截图/触控参数）。
     # 示例：Android://127.0.0.1:5037/<serial>?cap_method=javacap&touch_method=maxtouch
-    query = urlencode(
-        {
-            # 显式指定截图方式，避免默认先尝试 MINICAP 产生噪音日志。
-            "cap_method": CAP_METHOD.lower(),
-            # 显式指定触控方式，便于在不同机型稳定复现。
-            "touch_method": TOUCH_METHOD.lower(),
-        }
-    )
+    query_params = {
+        # 显式指定截图方式，避免默认先尝试 MINICAP 产生噪音日志。
+        "cap_method": CAP_METHOD.lower(),
+        # 显式指定触控方式，便于在不同机型稳定复现。
+        "touch_method": TOUCH_METHOD.lower(),
+    }
+    # 传入 adb 绝对路径时，强制 Airtest 使用该路径，避免误选外部常驻 adb。
+    if adb_path:
+        query_params["adb_path"] = adb_path
+    query = urlencode(query_params)
     uri = f"android://{ADB_SERVER_ADDR}/{serial}?{query}"
-    log.debug("组装设备 URI", serial=serial, uri=uri)
+    log.debug("组装设备 URI", serial=serial, uri=uri, adb_path=adb_path or "")
     return uri
 
 

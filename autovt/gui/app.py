@@ -61,48 +61,79 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _configure_page(self) -> None:
-        self.page.title = "AutoVT 管理后台"  # 设置窗口标题，保持桌面端统一文案。
-        self.page.theme = ft.Theme(  # 设置全局主题，统一滚动条可见性与对比度。
-            scrollbar_theme=ft.ScrollbarTheme(  # 配置全局滚动条样式。
-                thumb_visibility=True,  # 滚动条滑块始终可见。
-                track_visibility=True,  # 滚动条轨道始终可见。
-                thickness=9,  # 适当加粗滚动条，提升可发现性。
-                radius=6,  # 圆角滑块，视觉更柔和。
-                thumb_color=ft.Colors.BLUE_GREY_500,  # 全局滑块颜色使用中性深灰。
-                track_color=ft.Colors.with_opacity(0.14, ft.Colors.BLUE_GREY_400),  # 轨道使用浅灰半透明。
-                track_border_color=ft.Colors.with_opacity(0.30, ft.Colors.BLUE_GREY_500),  # 轨道边框略增强对比。
+        # 设置窗口标题，保持桌面端统一文案。
+        self.page.title = "AutoVT 管理后台"
+        # 设置全局主题，统一滚动条可见性与对比度。
+        self.page.theme = ft.Theme(
+            # 配置全局滚动条样式。
+            scrollbar_theme=ft.ScrollbarTheme(
+                # 滚动条滑块始终可见。
+                thumb_visibility=True,
+                # 滚动条轨道始终可见。
+                track_visibility=True,
+                # 适当加粗滚动条，提升可发现性。
+                thickness=9,
+                # 圆角滑块，视觉更柔和。
+                radius=6,
+                # 全局滑块颜色使用中性深灰。
+                thumb_color=ft.Colors.BLUE_GREY_500,
+                # 轨道使用浅灰半透明。
+                track_color=ft.Colors.with_opacity(0.14, ft.Colors.BLUE_GREY_400),
+                # 轨道边框略增强对比。
+                track_border_color=ft.Colors.with_opacity(0.30, ft.Colors.BLUE_GREY_500),
             )
         )
-        self.page.theme_mode = ft.ThemeMode.LIGHT  # 强制浅色主题，避免平台默认深色导致风格不一致。
-        self.page.padding = 0  # 页面不留默认边距，交给各子视图自行控制。
-        self.page.spacing = 0  # 页面级控件间距置 0，避免出现多余空白。
-        self.page.bgcolor = ft.Colors.BLUE_GREY_50  # 设置页面统一底色，登录页和主控台保持一致。
-        self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH  # 横向拉伸到满宽，避免出现“手机窄栏”观感。
-        self.page.vertical_alignment = ft.MainAxisAlignment.START  # 主内容从顶部开始布局，更符合后台管理台样式。
-        self.page.scroll = None  # 彻底禁用页面级滚动，各 Tab 内部容器独立管理滚动。
+        # 强制浅色主题，避免平台默认深色导致风格不一致。
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        # 页面不留默认边距，交给各子视图自行控制。
+        self.page.padding = 0
+        # 页面级控件间距置 0，避免出现多余空白。
+        self.page.spacing = 0
+        # 设置页面统一底色，登录页和主控台保持一致。
+        self.page.bgcolor = ft.Colors.BLUE_GREY_50
+        # 横向拉伸到满宽，避免出现“手机窄栏”观感。
+        self.page.horizontal_alignment = ft.CrossAxisAlignment.STRETCH
+        # 主内容从顶部开始布局，更符合后台管理台样式。
+        self.page.vertical_alignment = ft.MainAxisAlignment.START
+        # 彻底禁用页面级滚动，各 Tab 内部容器独立管理滚动。
+        self.page.scroll = None
 
-        self.page.window.width = 1280  # 设置默认桌面窗口宽度，提升首屏可用空间。
-        self.page.window.height = 820  # 设置默认桌面窗口高度，避免内容区域过窄。
-        self.page.window.min_width = 980  # 限制最小宽度，防止缩放到“手机模式”布局。
-        self.page.window.min_height = 640  # 限制最小高度，保证顶部按钮和列表可见。
-        self.page.window.maximized = False  # 关闭默认最大化，恢复普通窗口启动行为。
-        self.page.window.alignment = ft.Alignment.CENTER  # 声明窗口默认对齐方式为居中，减少启动后跳位。
-        self.page.window.icon = "icon.png"  # 设置运行时窗口图标（从 assets 目录加载）。
+        # 设置默认桌面窗口宽度，提升首屏可用空间。
+        self.page.window.width = 1280
+        # 设置默认桌面窗口高度，避免内容区域过窄。
+        self.page.window.height = 820
+        # 限制最小宽度，防止缩放到“手机模式”布局。
+        self.page.window.min_width = 980
+        # 限制最小高度，保证顶部按钮和列表可见。
+        self.page.window.min_height = 640
+        # 关闭默认最大化，恢复普通窗口启动行为。
+        self.page.window.maximized = False
+        # 声明窗口默认对齐方式为居中，减少启动后跳位。
+        self.page.window.alignment = ft.Alignment.CENTER
+        # 设置运行时窗口图标（从 assets 目录加载）。
+        self.page.window.icon = "icon.png"
 
     def _register_exit_hook(self) -> None:
         atexit.register(self._shutdown)
 
     def start(self) -> None:
-        self.login_view.build()  # 先构建登录界面，保证窗口首次展示时已有完整内容。
-        self.page.run_task(self._show_window_centered_async)  # 异步执行窗口居中并显示，避免阻塞 UI 线程。
+        # 先构建登录界面，保证窗口首次展示时已有完整内容。
+        self.login_view.build()
+        # 异步执行窗口居中并显示，避免阻塞 UI 线程。
+        self.page.run_task(self._show_window_centered_async)
 
     async def _show_window_centered_async(self) -> None:
-        try:  # 优先走“等待就绪 -> 居中”的平滑启动路径。
-            await self.page.window.wait_until_ready_to_show()  # 等待原生窗口可安全操作，减少平台时序问题。
-            await self.page.window.center()  # 将窗口移动到当前屏幕中心，提升首次打开体验。
-            self.page.update()  # 提交窗口位置变更。
+        # 优先走“等待就绪 -> 居中”的平滑启动路径。
+        try:
+            # 等待原生窗口可安全操作，减少平台时序问题。
+            await self.page.window.wait_until_ready_to_show()
+            # 将窗口移动到当前屏幕中心，提升首次打开体验。
+            await self.page.window.center()
+            # 提交窗口位置变更。
+            self.page.update()
         except Exception:
-            log.exception("窗口居中显示失败")  # 记录异常堆栈，便于定位某些平台的窗口 API 兼容问题。
+            # 记录异常堆栈，便于定位某些平台的窗口 API 兼容问题。
+            log.exception("窗口居中显示失败")
 
     # ═══════════════════════════════════════════════════════════════════
     # 登录成功回调
@@ -136,27 +167,43 @@ class AutoVTGuiApp:
             label_color=ft.Colors.BLUE_700,
             unselected_label_color=ft.Colors.BLUE_GREY_600,
         )
-        tab_view = ft.TabBarView(  # 构建标签内容视图，和 TabBar 一起挂载到 Tabs 下。
-            controls=self._tab_contents,  # 绑定三个 tab 的内容控件列表。
-            expand=True,  # 内容区域拉伸占满剩余空间。
+        # 构建标签内容视图，和 TabBar 一起挂载到 Tabs 下。
+        tab_view = ft.TabBarView(
+            # 绑定三个 tab 的内容控件列表。
+            controls=self._tab_contents,
+            # 内容区域拉伸占满剩余空间。
+            expand=True,
         )
-        self.tabs_control = ft.Tabs(  # 创建 Tabs 容器，确保 TabBar 合规使用。
-            length=3,  # 声明总标签数量。
-            selected_index=0,  # 默认选中第一个“设备列表”。
-            on_change=self._on_tab_changed,  # 切换标签时触发刷新逻辑。
-            content=ft.Column(  # Tabs 内部采用“TabBar + TabBarView”结构。
+        # 创建 Tabs 容器，确保 TabBar 合规使用。
+        self.tabs_control = ft.Tabs(
+            # 声明总标签数量。
+            length=3,
+            # 默认选中第一个“设备列表”。
+            selected_index=0,
+            # 切换标签时触发刷新逻辑。
+            on_change=self._on_tab_changed,
+            # Tabs 内部采用“TabBar + TabBarView”结构。
+            content=ft.Column(
                 controls=[
-                    self.tab_bar,  # 顶部标签栏控件。
-                    ft.Container(  # 标签内容外层容器。
-                        expand=True,  # 拉伸填充剩余高度。
-                        padding=ft.padding.only(left=16, right=16, bottom=16),  # 内容区域统一内边距。
-                        content=tab_view,  # 标签对应内容视图。
+                    # 顶部标签栏控件。
+                    self.tab_bar,
+                    # 标签内容外层容器。
+                    ft.Container(
+                        # 拉伸填充剩余高度。
+                        expand=True,
+                        # 内容区域统一内边距。
+                        padding=ft.padding.only(left=16, right=16, bottom=16),
+                        # 标签对应内容视图。
+                        content=tab_view,
                     ),
                 ],
-                spacing=0,  # 控件间距置零，避免额外空白。
-                expand=True,  # 整体占据可用高度。
+                # 控件间距置零，避免额外空白。
+                spacing=0,
+                # 整体占据可用高度。
+                expand=True,
             ),
-            expand=True,  # Tabs 自身拉伸占满父容器。
+            # Tabs 自身拉伸占满父容器。
+            expand=True,
         )
 
         header = ft.Container(
@@ -192,11 +239,14 @@ class AutoVTGuiApp:
 
         self._current_tab_index = new_index
 
-        if new_index == 0:  # 切回设备列表时同步刷新设备状态。
+        # 切回设备列表时同步刷新设备状态。
+        if new_index == 0:
             self.device_tab.refresh(source="tab_switch", show_toast=False)
-        elif new_index == 1:  # 切到账号列表时刷新账号数据。
+        # 切到账号列表时刷新账号数据。
+        elif new_index == 1:
             self.account_tab.refresh(source="tab_switch", show_toast=False)
-        elif new_index == 2:  # 切到设置页时刷新配置数据。
+        # 切到设置页时刷新配置数据。
+        elif new_index == 2:
             self.settings_tab.refresh(source="tab_switch", show_toast=False)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -223,32 +273,51 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _run_action(self, action_name: str, fn: Callable[[], str | list[str]]) -> None:
-        log.info("收到 GUI 动作请求", action=action_name)  # 先记一条开始日志，便于确认按钮点击事件已触发。
-        message_text = ""  # 初始化动作结果文案，后续统一用于提示条展示。
+        # 先记一条开始日志，便于确认按钮点击事件已触发。
+        log.info("收到 GUI 动作请求", action=action_name)
+        # 初始化动作结果文案，后续统一用于提示条展示。
+        message_text = ""
         try:
-            result = fn()  # 执行具体动作函数（如 start_all / stop_all / start_worker 等）。
-            if isinstance(result, list):  # 列表返回值场景（批量动作）。
-                message_text = f"{action_name}: {'; '.join(result)}"  # 拼接批量动作返回消息。
-            else:  # 单条返回值场景（单设备动作）。
-                message_text = f"{action_name}: {result}"  # 直接构造单条动作提示文案。
-            log.info("GUI 动作执行完成", action=action_name, message=message_text)  # 记录动作成功日志。
+            # 执行具体动作函数（如 start_all / stop_all / start_worker 等）。
+            result = fn()
+            # 列表返回值场景（批量动作）。
+            if isinstance(result, list):
+                # 拼接批量动作返回消息。
+                message_text = f"{action_name}: {'; '.join(result)}"
+            # 单条返回值场景（单设备动作）。
+            else:
+                # 直接构造单条动作提示文案。
+                message_text = f"{action_name}: {result}"
+            # 记录动作成功日志。
+            log.info("GUI 动作执行完成", action=action_name, message=message_text)
         except Exception as exc:
-            log.exception("执行动作失败", action=action_name)  # 记录异常堆栈，便于定位失败原因。
-            message_text = f"{action_name} 失败: {exc}"  # 失败场景下也要给出可读反馈文案。
-        self._show_snack(message_text)  # 尝试展示提示条（内部已做异常兜底）。
+            # 记录异常堆栈，便于定位失败原因。
+            log.exception("执行动作失败", action=action_name)
+            # 失败场景下也要给出可读反馈文案。
+            message_text = f"{action_name} 失败: {exc}"
+        # 尝试展示提示条（内部已做异常兜底）。
+        self._show_snack(message_text)
         try:
-            self.device_tab.refresh(source="action", show_toast=False)  # 动作后立即刷新设备区，避免用户等待轮询才看到状态变化。
-            self.page.update()  # 提交页面更新，保证刷新结果尽快可见。
+            # 动作后立即刷新设备区，避免用户等待轮询才看到状态变化。
+            self.device_tab.refresh(source="action", show_toast=False)
+            # 提交页面更新，保证刷新结果尽快可见。
+            self.page.update()
         except Exception:
-            log.exception("动作后刷新设备区失败", action=action_name)  # 刷新失败不影响主流程，仅记录日志排查。
+            # 刷新失败不影响主流程，仅记录日志排查。
+            log.exception("动作后刷新设备区失败", action=action_name)
 
     def _show_snack(self, message: str) -> None:
-        try:  # 尝试展示提示条；异常时只记日志，不再把异常抛回按钮事件。
-            snack = ft.SnackBar(content=ft.Text(str(message)), duration=3000)  # 构造提示条控件，统一消息展示入口。
-            self.page.show_dialog(snack)  # flet 0.80.5 使用 show_dialog 打开 SnackBar（Page.open 不可用）。
-            self.page.update()  # 立即刷新页面，让提示条及时显示。
+        # 尝试展示提示条；异常时只记日志，不再把异常抛回按钮事件。
+        try:
+            # 构造提示条控件，统一消息展示入口。
+            snack = ft.SnackBar(content=ft.Text(str(message)), duration=3000)
+            # flet 0.80.5 使用 show_dialog 打开 SnackBar（Page.open 不可用）。
+            self.page.show_dialog(snack)
+            # 立即刷新页面，让提示条及时显示。
+            self.page.update()
         except Exception:
-            log.exception("展示提示条失败", message=message)  # 记录提示条异常，避免用户误以为“点击无响应”。
+            # 记录提示条异常，避免用户误以为“点击无响应”。
+            log.exception("展示提示条失败", message=message)
 
     # ═══════════════════════════════════════════════════════════════════
     # 后台监控
@@ -298,9 +367,12 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
         if getattr(sys, "_MEIPASS", None):
             log.info("检测到 PyInstaller 打包运行，跳过 FLET_PLATFORM 强制设置")
         else:
-            exe_path = Path(sys.executable)  # 读取当前解释器/可执行文件路径，用于判断运行形态。
-            exe_text = str(exe_path)  # 转字符串便于做路径片段判断。
-            system_name = platform.system().lower()  # 读取当前系统名（darwin/windows/linux）。
+            # 读取当前解释器/可执行文件路径，用于判断运行形态。
+            exe_path = Path(sys.executable)
+            # 转字符串便于做路径片段判断。
+            exe_text = str(exe_path)
+            # 读取当前系统名（darwin/windows/linux）。
+            system_name = platform.system().lower()
 
             # macOS 打包 app：典型路径包含 ".app/Contents/MacOS/"。
             is_macos_bundle = system_name == "darwin" and ".app/Contents/MacOS/" in exe_text
@@ -308,10 +380,12 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
             is_windows_bundle = system_name.startswith("win") and exe_path.suffix.lower() == ".exe" and "python" not in exe_path.name.lower()
 
             if is_macos_bundle:
-                os.environ["FLET_PLATFORM"] = "macos"  # 标记为 embedded macOS 运行模式。
+                # 标记为 embedded macOS 运行模式。
+                os.environ["FLET_PLATFORM"] = "macos"
                 log.info("检测到 macOS 打包运行，已设置 FLET_PLATFORM", value=os.environ["FLET_PLATFORM"])
             elif is_windows_bundle:
-                os.environ["FLET_PLATFORM"] = "windows"  # 标记为 embedded Windows 运行模式。
+                # 标记为 embedded Windows 运行模式。
+                os.environ["FLET_PLATFORM"] = "windows"
                 log.info("检测到 Windows 打包运行，已设置 FLET_PLATFORM", value=os.environ["FLET_PLATFORM"])
 
     def _main(page: ft.Page) -> None:
