@@ -12,6 +12,7 @@ dependencies = [
     # 这一行是给你自己的代码用的，保证你在 Windows 上能 import win32api
     "pywin32>=306; sys_platform == 'win32'",
     "pyinstaller>=6.18.0",
+    "cryptography>=46.0.5",
 ]
 
 # --- 核心魔法区域 ---

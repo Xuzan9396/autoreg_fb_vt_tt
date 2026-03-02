@@ -33,7 +33,7 @@ MOJIWANG_RUN_NUM_DEFAULT = "3"
 # 定义账号 status=2/3 场景的最大重试次数配置 key 常量。
 STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
 # 定义状态重试次数配置描述文案常量。
-STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号最大重试次数: 0 到 5 填写值"
+STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号重试次数: 0=不重试，1=重试一次（范围 0 到 5）"
 # 定义状态重试默认次数为 0（表示不重试）。
 STATUS_23_RETRY_MAX_DEFAULT = "0"
 # 定义状态重试次数最小值（0=不重试）。
@@ -257,7 +257,6 @@ class UserDB:
             create_at INTEGER NOT NULL DEFAULT 0,
             update_at INTEGER NOT NULL DEFAULT 0
         );
-        # 组装建表 SQL（SQL 字符串内部不放 Python 注释，避免 SQLite 解析错误）。
         """
         create_config_table_sql = f"""
         CREATE TABLE IF NOT EXISTS {CONFIG_TABLE_NAME} (
@@ -266,7 +265,6 @@ class UserDB:
             "desc" TEXT NOT NULL DEFAULT '',
             update_at INTEGER NOT NULL DEFAULT 0
         );
-        # 组装配置表 SQL（key/val/desc 结构）。
         """
         # 使用事务上下文执行建表和索引创建，保证原子性。
         with conn:
@@ -341,7 +339,6 @@ class UserDB:
             f"""
             INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
             VALUES (?, ?, ?, ?);
-            # 默认配置 SQL。
             """,
             # 默认配置参数。
             (MOJIWANG_RUN_NUM_KEY, default_val, MOJIWANG_RUN_NUM_DESC, now_ts()),
@@ -354,7 +351,6 @@ class UserDB:
             f"""
             INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
             VALUES (?, ?, ?, ?);
-            # 默认配置 SQL。
             """,
             # 默认配置参数。
             (STATUS_23_RETRY_MAX_KEY, retry_default_val, STATUS_23_RETRY_MAX_DESC, now_ts()),
@@ -557,7 +553,6 @@ class UserDB:
             device = excluded.device,
             msg = excluded.msg,
             update_at = excluded.update_at;
-        # 组装 UPSERT SQL（SQL 字符串内部不放 Python 注释，避免 SQLite 解析错误）。
         """
         # 组装 SQL 参数元组，按占位符顺序传入。
         params = (
@@ -724,7 +719,6 @@ class UserDB:
                 WHERE status = 0 AND (device = '' OR device IS NULL)
                 ORDER BY id ASC
                 LIMIT 1;
-                # 取最早可用账号，确保分配顺序稳定。
                 """,
             # 读取候选账号。
             ).fetchone()
@@ -742,7 +736,6 @@ class UserDB:
                 UPDATE {TABLE_NAME}
                 SET status = 1, device = ?, update_at = ?
                 WHERE id = ? AND status = 0 AND (device = '' OR device IS NULL);
-                # 条件更新再次校验，防止异常场景下脏写。
                 """,
                 # 传入设备 serial、更新时间和候选 id。
                 (safe_device, int(ts_now), candidate_id),
@@ -802,7 +795,6 @@ class UserDB:
                     device = '',
                     update_at = ?
                 WHERE device = ?;
-                # status=1 回收为 0；status=2/3 只清空 device 不改状态。
                 """,
                 # 传入更新时间和设备 serial。
                 (int(update_time), safe_device),
@@ -1117,7 +1109,6 @@ class UserDB:
             create_at,
             update_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        # 组装新增 SQL（仅插入，不做冲突更新）。
         """
         # 组装 SQL 参数元组。
         params = (
@@ -1202,7 +1193,6 @@ class UserDB:
             msg = ?,
             update_at = ?
         WHERE id = ?;
-        # 组装按 id 更新 SQL。
         """
         # 组装 SQL 参数元组。
         params = (
@@ -1387,39 +1377,72 @@ class UserDB:
                     "val" = excluded."val",
                     "desc" = excluded."desc",
                     update_at = excluded.update_at;
-                # 配置 UPSERT SQL。
                 """,
                 # UPSERT 参数。
                 (key_value, normalized_val, desc_value, int(update_time)),
             # SQL 执行结束。
             )
 
-    # 定义按邮箱更新 status（可选更新备注）方法。
-    def update_status(self, email_account: str, status: int, msg: str | None = None) -> int:
+    # 定义按邮箱更新 status/fb_status（可选更新备注）方法。
+    def update_status(
+        self,
+        email_account: str,
+        status: int,
+        msg: str | None = None,
+        fb_status: int | None = None,
+    ) -> int:
         # 获取可用连接。
         conn = self.connect()
+        # 标准化邮箱参数，避免空白字符导致命中失败。
+        safe_email_account = str(email_account).strip()
+        # 邮箱为空时直接抛错，避免误更新整表。
+        if safe_email_account == "":
+            # 抛出可读错误提示。
+            raise ValueError("email_account 不能为空")
         # 生成本次更新时间戳。
         update_time = now_ts()
+        # 预处理备注文本参数（None 表示不更新 msg 字段）。
+        safe_msg = None if msg is None else str(msg)
         # 使用事务上下文执行更新。
         with conn:
-            # 如果调用方不想更新备注。
-            if msg is None:
-                # 执行只更新 status 和 update_at 的 SQL。
+            # 当 msg/fb_status 都不更新时，仅更新 status 和 update_at。
+            if safe_msg is None and fb_status is None:
+                # 执行最小字段更新 SQL。
                 cursor = conn.execute(
                     # 只改状态和更新时间。
                     f"UPDATE {TABLE_NAME} SET status = ?, update_at = ? WHERE email_account = ?;",
                     # 传入 SQL 参数。
-                    (int(status), int(update_time), email_account),
+                    (int(status), int(update_time), safe_email_account),
                 # SQL 执行结束。
                 )
-            # 如果调用方传了备注。
-            else:
-                # 执行同时更新 status、msg、update_at 的 SQL。
+            # 当只更新 fb_status（不更新 msg）时执行此分支。
+            elif safe_msg is None and fb_status is not None:
+                # 执行状态 + Facebook 状态更新 SQL。
                 cursor = conn.execute(
-                    # 同时改状态、备注、更新时间。
+                    # 同时改 status、fb_status、update_at。
+                    f"UPDATE {TABLE_NAME} SET status = ?, fb_status = ?, update_at = ? WHERE email_account = ?;",
+                    # 传入 SQL 参数。
+                    (int(status), int(fb_status), int(update_time), safe_email_account),
+                # SQL 执行结束。
+                )
+            # 当只更新 msg（不更新 fb_status）时执行此分支。
+            elif safe_msg is not None and fb_status is None:
+                # 执行状态 + 备注更新 SQL。
+                cursor = conn.execute(
+                    # 同时改 status、msg、update_at。
                     f"UPDATE {TABLE_NAME} SET status = ?, msg = ?, update_at = ? WHERE email_account = ?;",
                     # 传入 SQL 参数。
-                    (int(status), msg, int(update_time), email_account),
+                    (int(status), safe_msg, int(update_time), safe_email_account),
+                # SQL 执行结束。
+                )
+            # 当 msg/fb_status 都需要更新时执行此分支。
+            else:
+                # 执行状态 + Facebook 状态 + 备注更新 SQL。
+                cursor = conn.execute(
+                    # 同时改 status、fb_status、msg、update_at。
+                    f"UPDATE {TABLE_NAME} SET status = ?, fb_status = ?, msg = ?, update_at = ? WHERE email_account = ?;",
+                    # 传入 SQL 参数。
+                    (int(status), int(fb_status), safe_msg, int(update_time), safe_email_account),
                 # SQL 执行结束。
                 )
         # 返回受影响行数，便于上层判断是否更新成功。

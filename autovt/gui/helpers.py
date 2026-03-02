@@ -18,7 +18,7 @@ ACCOUNT_PAGE_SIZE = 20
 MOJIWANG_RUN_NUM_KEY = "mojiwang_run_num"
 MOJIWANG_RUN_NUM_DESC = "抹机玩抹机次数: 1 到 100 填写值"
 STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
-STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号最大重试次数: 0 到 5 填写值"
+STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号重试次数: 0=不重试，1=重试一次（范围 0 到 5）"
 
 
 # ── 数据类 ────────────────────────────────────────────────────────────────

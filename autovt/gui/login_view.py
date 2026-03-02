@@ -6,7 +6,8 @@ from typing import Callable
 
 import flet as ft
 
-from autovt.gui.helpers import LOGIN_PASSWORD, LOGIN_USERNAME
+# 导入登录服务，复用 Go 版加密登录协议和本地缓存能力。
+from autovt.auth import LoginService
 
 
 class LoginView:
@@ -15,6 +16,8 @@ class LoginView:
     def __init__(self, page: ft.Page, on_login_success: Callable[[], None]) -> None:
         self.page = page
         self._on_login_success = on_login_success
+        # 初始化登录服务实例。
+        self.login_service = LoginService()
 
         self.username_input: ft.TextField | None = None
         self.password_input: ft.TextField | None = None
@@ -22,16 +25,22 @@ class LoginView:
 
     def build(self) -> None:
         """构建登录界面并挂载到页面。"""
+        # 读取本地上次登录缓存，作为默认回填值。
+        saved_username, saved_password = self.login_service.load_saved_credentials()
+        # 根据环境变量决定当前是否是调试跳过登录模式。
+        skip_login_mode = self.login_service.is_skip_api_login()
+        # 组装登录页底部提示文案。
+        mode_tip_text = "调试模式：GITXUZAN_LOGIN=1，当前已跳过 API 登录校验" if skip_login_mode else "账号/密码登录"
         self.username_input = ft.TextField(
             label="账号",
-            value=LOGIN_USERNAME,
+            value=saved_username,
             width=320,
             prefix_icon=ft.Icons.PERSON,
             autofocus=True,
         )
         self.password_input = ft.TextField(
             label="密码",
-            value=LOGIN_PASSWORD,
+            value=saved_password,
             width=320,
             password=True,
             can_reveal_password=True,
@@ -55,7 +64,7 @@ class LoginView:
             content=ft.Column(
                 controls=[
                     ft.Text("AutoVT 登录", size=26, weight=ft.FontWeight.W_700),
-                    ft.Text("默认账号：admin  默认密码：123456", color=ft.Colors.BLUE_GREY_600, size=13),
+                    ft.Text(mode_tip_text, color=ft.Colors.BLUE_GREY_600, size=13),
                     self.username_input,
                     self.password_input,
                     ft.FilledButton(
@@ -105,13 +114,25 @@ class LoginView:
 
     def _handle_login(self, _e: ft.ControlEvent) -> None:
         """处理登录按钮点击或回车提交事件。"""
+        # 读取当前输入账号并做 trim。
         username = (self.username_input.value if self.username_input else "").strip()
-        password = (self.password_input.value if self.password_input else "").strip()
+        # 读取当前输入密码（不做 trim，避免误删空格密码）。
+        password = str(self.password_input.value if self.password_input else "")
+        # 调用登录服务执行鉴权。
+        result = self.login_service.login(account=username, password=password)
 
-        if username != LOGIN_USERNAME or password != LOGIN_PASSWORD:
+        # 登录失败时展示错误文案并返回。
+        if not result.ok:
             if self.login_tip:
-                self.login_tip.value = "账号或密码错误，请重试。"
+                self.login_tip.value = result.msg or "登录失败"
             self.page.update()
             return
-
+        # 登录成功后保存本地账号密码缓存。
+        self.login_service.save_credentials(account=username, password=password)
+        # 清空错误提示文本。
+        if self.login_tip:
+            self.login_tip.value = ""
+        # 先刷新页面状态，再进入主控台。
+        self.page.update()
+        # 触发上层登录成功回调。
         self._on_login_success()

@@ -163,6 +163,12 @@ def run_target_method(task: OpenSettingsTask, method_name: str) -> None:
         # 当前分支结束后返回。
         return
 
+    if method_name == "facebook_select_img":
+        # 执行 Facebook 选择图片方法。
+        task.facebook_select_img()
+        # 当前分支结束后返回。
+        return
+
     # 只跑抹机王某一轮。
     if method_name == "mojiwang_run_one_loop":
         # 读取第2个参数作为 loop_index，默认 0。
@@ -279,8 +285,18 @@ def main() -> None:
     # 强制校验上下文必填字段，缺失时立即抛错停止调试。
     task_context.ensure_required()
     # 模拟填充一条用户信息，供任务方法使用。
-    task_context.user_info = {"email_account": "KendraMurphy9734@hotmail.com", "first_name": "Patricia","last_name": "Lenoir","pwd": "Xz272511272511"}
 
+    task_context.user_info = {
+        # "email_account": "CynthiaPerkins8103@hotmail.com",
+        # "email_access_key": "M.C550_BAY.0.U.-Chpeon3X278tmyyLw8y*nt62My6VzvDWKwyXkeZKLUsgEAoHe9hg!Xz*T1F4bNhyXX1d4M5N3S0nE0jFfJxDG99oPuL*hPaAz4bZVG20PDNFxkKiVMQBuOv0WS9BI07mBwbsGw09qB85z35DjThngE3qfowD93sTtN98TSPg8x0qqIou4CIFDWGdAFdixOs!vMsP8FNqtvVxZgUbBlhg6j!SUpySfdV6k11Rbh5pjYbu*ixKWVS2gZoPtGKtMOWBNQ!M9XB*A2MXHL2EMpgD5U*GQvOStlzw30WML3wTRys8O9cjncQx7Jhxe2UhrGnZz9m99sYV*aTu*R3wQJkRD476!YTbUDLYRdGaPbTqcmx!udJcMo1meZfpZkq7HneMw1MTqGqFJIpNR5Cx3A4cdsRnlyABGbRNlcZ4EYyr1LA3UiXwasTEZmWgXq2EwC5bLg$$",
+        # "first_name": "Vernon","last_name": "Williams",
+
+        "email_account": "NatalieMorton7264@hotmail.com",
+        "email_access_key": "M.C554_BL2.0.U.-CoSgnVOa9mugvD!ky0wy3XVN4Z91XPAub1x3mIAHzTrEykMIykPNI*ABR2Ls37MuNAN5NtUZ9980tJdXbOnBDVaXv*At7YTsEUy92DSBWVSE4CuJerJu*drOKY8Q1xK0fZr!H0OpPCiOQObMdTDYcFRs6U50!**36Fqd*cqm1mPSNg7kSMKttTW9pUZt!u51DTVYLvYRshtulfIfIC*l2O8ekIAfh3dhIlIJyGpy7YzkaOr!!DGbPfkhn5CjwydXE*in7UbPTmPVoJBB2flVaCMcqFD5bpJwpPKDBOUJCY9mM!10m!*b6tPrEtM7nNbvygqzgSLtCrBfsZOobprrPr4OXMEQCeDpbuucJ!F1uFcCmwQZNQehYksztOy4Z5t2jOiCZlbvI9IupaNSfgUf0wmPCZAihEgiB1F7my75ufekQgW3dwU*EnzFbnlhE48VHA$$",
+        "first_name": "Vera","last_name": "Wootton",
+
+        "client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+        "pwd": "Xz272511272511"}
     # 创建任务实例（统一通过上下文对象传参）。
     task = OpenSettingsTask(task_context=task_context)
     # 打印本次调试入口信息，确认设备和语言上下文。

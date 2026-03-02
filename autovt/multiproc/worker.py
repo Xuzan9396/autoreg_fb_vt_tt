@@ -120,7 +120,7 @@ def _sleep_with_stop(stop_event: mp.Event, sec: float) -> None:
 
 
 def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
-    # 从 t_config 映射读取“status=2/3 同账号最大重试次数”配置，并做 0~5 边界保护。
+    # 从 t_config 映射读取“status=2/3 同账号重试次数”配置，并做 0~5 边界保护。
     # 读取配置原始值，缺失时回退默认值 0。
     raw_value = str(config_map.get(STATUS_23_RETRY_MAX_KEY, STATUS_23_RETRY_MAX_DEFAULT)).strip()
     # 尝试解析整数。
@@ -139,7 +139,7 @@ def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
     if parsed_value > STATUS_23_RETRY_MAX:
         # 返回最大值 5。
         return STATUS_23_RETRY_MAX
-    # 返回合法重试次数。
+    # 返回合法重试次数（语义：0=不重试，1=重试一次）。
     return parsed_value
 
 
@@ -365,16 +365,16 @@ def worker_main(
 
     # 当前设备绑定的一条账号记录。
     assigned_user: dict[str, Any] | None = None
-    # 记录当前账号在 status=2/3 下已执行的重试次数。
-    assigned_status_23_retry_count = 0
+    # 记录当前账号在 status=2/3 下“已执行的额外重试次数”（不包含首轮执行）。
+    assigned_status_23_retry_used = 0
     # 标记是否处于“无可用账号等待中”，避免重复刷屏日志。
     waiting_for_user = False
 
     def _ensure_assigned_user(config_map: dict[str, str]) -> dict[str, Any] | None:
         """确保当前设备拿到一条可运行账号（status=1），并支持 status=2/3 同账号重试。"""
-        nonlocal assigned_user, assigned_status_23_retry_count
+        nonlocal assigned_user, assigned_status_23_retry_used
 
-        # 读取 status=2/3 同账号最大重试次数配置。
+        # 读取 status=2/3 同账号重试次数配置（0=不重试，1=重试一次）。
         retry_limit = _read_status_23_retry_limit(config_map)
 
         # 优先刷新当前内存账号，避免每轮重复抢占。
@@ -394,15 +394,15 @@ def worker_main(
                     # 更新本地缓存为最新记录。
                     assigned_user = dict(latest)
                     # 回到运行中时清空 2/3 重试计数。
-                    assigned_status_23_retry_count = 0
+                    assigned_status_23_retry_used = 0
                     # 返回当前账号，继续执行任务。
                     return assigned_user
                 # status=2/3 时按配置决定是否继续同账号重试。
                 if current_status in {2, 3}:
                     # 未超过最大重试次数时继续复用同账号。
-                    if assigned_status_23_retry_count < retry_limit:
+                    if assigned_status_23_retry_used < retry_limit:
                         # 进入一次新的重试轮次并累加计数。
-                        assigned_status_23_retry_count += 1
+                        assigned_status_23_retry_used += 1
                         # 更新本地缓存为最新记录。
                         assigned_user = dict(latest)
                         # 记录“同账号重试”日志，便于排查。
@@ -412,7 +412,7 @@ def worker_main(
                             user_id=user_id,
                             status=current_status,
                             email_account=email_account,
-                            retry_index=assigned_status_23_retry_count,
+                            retry_index=assigned_status_23_retry_used,
                             retry_limit=retry_limit,
                         )
                         # 返回当前账号，让任务继续重试。
@@ -426,13 +426,13 @@ def worker_main(
                         user_id=user_id,
                         status=current_status,
                         email_account=email_account,
-                        retry_count=assigned_status_23_retry_count,
+                        retry_count=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
                     )
                     # 清空当前账号缓存。
                     assigned_user = None
                     # 清空当前账号的重试计数。
-                    assigned_status_23_retry_count = 0
+                    assigned_status_23_retry_used = 0
                 # 其他状态视为不可运行，释放绑定后重新分配。
                 else:
                     # 清空设备绑定，避免遗留占用。
@@ -447,13 +447,13 @@ def worker_main(
                     # 清空当前账号缓存。
                     assigned_user = None
                     # 清空重试计数。
-                    assigned_status_23_retry_count = 0
+                    assigned_status_23_retry_used = 0
             # 当前缓存账号已不在本设备上，清空本地缓存并重新领取。
             else:
                 # 清空当前账号缓存。
                 assigned_user = None
                 # 清空重试计数，避免串到下一条账号。
-                assigned_status_23_retry_count = 0
+                assigned_status_23_retry_used = 0
 
         # 兜底：检查数据库里是否仍有绑定到本设备的账号（可能来自进程重启恢复）。
         # 按设备反查当前绑定账号。
@@ -471,15 +471,15 @@ def worker_main(
                 # 写回当前账号缓存。
                 assigned_user = dict(bound_row)
                 # 清空 2/3 重试计数。
-                assigned_status_23_retry_count = 0
+                assigned_status_23_retry_used = 0
                 # 返回绑定账号。
                 return assigned_user
             # 绑定账号处于 2/3 状态时按配置决定是否继续同账号重试。
             if bound_status in {2, 3}:
                 # 未超过上限则继续同账号重试。
-                if assigned_status_23_retry_count < retry_limit:
+                if assigned_status_23_retry_used < retry_limit:
                     # 累加重试次数。
-                    assigned_status_23_retry_count += 1
+                    assigned_status_23_retry_used += 1
                     # 写回当前账号缓存。
                     assigned_user = dict(bound_row)
                     log.info(
@@ -488,7 +488,7 @@ def worker_main(
                         user_id=bound_user_id,
                         status=bound_status,
                         email_account=bound_email,
-                        retry_index=assigned_status_23_retry_count,
+                        retry_index=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
                     )
                     # 返回绑定账号进入重试。
@@ -501,11 +501,11 @@ def worker_main(
                     user_id=bound_user_id,
                     status=bound_status,
                     email_account=bound_email,
-                    retry_count=assigned_status_23_retry_count,
+                    retry_count=assigned_status_23_retry_used,
                     retry_limit=retry_limit,
                 )
                 # 重试结束后重置计数器。
-                assigned_status_23_retry_count = 0
+                assigned_status_23_retry_used = 0
                 # 清空账号缓存，进入新分配流程。
                 assigned_user = None
             # 非 1/2/3 状态绑定视为遗留，先清掉 device 再参与新分配。
@@ -520,7 +520,7 @@ def worker_main(
                     email_account=bound_email,
                 )
                 # 清空计数器。
-                assigned_status_23_retry_count = 0
+                assigned_status_23_retry_used = 0
                 # 清空缓存。
                 assigned_user = None
 
@@ -533,7 +533,7 @@ def worker_main(
         # 把 sqlite Row 转成字典缓存。
         assigned_user = dict(assigned_user)
         # 新账号分配成功后重置重试计数。
-        assigned_status_23_retry_count = 0
+        assigned_status_23_retry_used = 0
         # 返回新分配账号。
         return assigned_user
 

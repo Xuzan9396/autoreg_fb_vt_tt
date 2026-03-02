@@ -8,6 +8,8 @@ FACEBOOK_LAST_NAME_INPUT = {"fr": "Nom de famille", "en": "Last name"}
 FACEBOOK_FIRST_LAST_NAME_NEXT = {"fr": "Suivant", "en": "Next"}
 # Facebook 创建账号按钮文案映射（按语言）。
 FACEBOOK_CREATE_USER_BUTTON = {"fr": "Créer un compte", "en": ""}
+# 有时候出现这个
+FACEBOOK_CREATE_USER_BUTTONV2 = {"fr": "Create new account", "en": ""}
 # Facebook 创建账号按钮文案映射（注册信息页，按语言）
 FACEBOOK_CREATE_USER_BUTTON_PAGE2 = {"fr": "Créer un nouveau compte", "en": ""}
 # Facebook 年份选择框文案点击 SET
@@ -31,14 +33,83 @@ FACEBOOK_INPUT_PASSWORD = {"fr": "Mot de passe", "en": ""}
 
 
 # 最后信息确认页面创建账号按钮
-# J’accepte
 # Facebook 最后信息确认页面创建账号按钮文案映射（按语言）
 FACEBOOK_FINAL_CREATE_USER_BUTTON = {"fr": "J’accepte", "en": ""}
 
 
+# 刷新字体 Réessayer
+# Facebook 刷新字体按钮文案映射（按语言）
+FACEBOOK_REFRESH_FONT_BUTTON = {"fr": "Réessayer", "en": ""}
+
+# 验证码输入框 Code de confirmation
+# Facebook 验证码输入框文案映射（按语言）
+FACEBOOK_EMAIL_CODE_INPUT = {"fr": "Code de confirmation", "en": ""}
+
+
+# 忽略 Ignorer
+# Facebook 验证码输入框文案映射（按语言）
+FACEBOOK_IGNORE_BUTTON = {"fr": "Ignorer", "en": ""}
+
+
+# 稍后按钮
+# Facebook 稍后按钮文案映射（按语言）
+FACEBOOK_LATER_BUTTON = {"fr": "Plus tard", "en": ""}
+
+# 弹框忽略 IGNORER
+# Facebook 弹框忽略按钮文案映射（按语言）
+FACEBOOK_POPUP_IGNORE_BUTTON = {"fr": "IGNORER", "en": ""}
+
+
+# 接受所有 cookie
+# Facebook 接受所有 cookie 按钮文案映射（按语言）
+FACEBOOK_ACCEPT_ALL_COOKIE_BUTTON = {"fr": "Autoriser tous les cookies", "en": ""}
+
+# 首页菜单三条杆
+# poco(desc="Menu, onglet 5 sur 5").click()
+
+FACEBOOK_MENU_TAB_DESC = {"fr": "Menu, onglet 5 sur 5", "en":"" }
+
+
+# Ajouter une photo 添加头像新的弹框
+FACEBOOK_ADD_PHOTO_POPUP = {"fr": "Ajouter une photo", "en": ""}
 
 
 
+# 首页的头像
+# votre photo de profil
+# Facebook 首页头像按钮文案映射（按语言）
+FACEBOOK_PROFILE_PHOTO_BUTTON = {"fr": "votre photo de profil", "en": ""}
+
+FACEBOOK_PROFILE_PHOTO_BUTTON_2 = {"fr": "Ajouter", "en": ""}
+# 选择唤醒相册
+# Choisir une photo de profil
+FACEBOOK_PROFILE_PHOTO_BOTTOM_BUTTON = {"fr": "Choisir une photo de profil", "en": ""}
+
+# 相册授权 Autoriser l’accès
+# Facebook 相册授权按钮文案映射（按语言）
+FACEBOOK_ALBUM_AUTH_BUTTON = {"fr": "Autoriser l’accès", "en": ""}
 
 
+# 确认相片 ENREGISTRER
+FACEBOOK_CONFIRM_PHOTO_BUTTON = {"fr": "ENREGISTRER", "en": ""}
 
+# 最后确认 C’est bien
+FACEBOOK_FINAL_CONFIRM_BUTTON = {"fr": "C’est bien", "en": ""}
+FACEBOOK_FINAL_CONFIRM_BUTTONV2 = {"fr": "Voir votre profil", "en": ""}
+
+
+# Oui, me connecter en tant
+
+ # 是否注册了
+FACEBOOK_IS_REGISTERED_BUTTON = {"fr": "Oui, me connecter en tant.*", "en": ""}
+
+
+# 继续邮箱登录
+# Continuer
+
+FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON = {"fr": "Continuer", "en": ""}
+
+
+# 聚焦验证码
+# Entrez le code
+FACEBOOK_FOCUS_EMAIL_CODE_INPUT = {"fr": "Entrez le code", "en": ""}

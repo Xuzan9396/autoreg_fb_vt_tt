@@ -13,6 +13,10 @@ from autovt.settings import ADB_BIN, ADB_SERVER_ADDR, CAP_METHOD, TOUCH_METHOD
 log = get_logger("adb")
 # 缓存一次已解析的 adb 绝对路径，避免每次刷新设备都重复探测。
 _RESOLVED_ADB_BIN: str | None = None
+# 定义 adb devices 命令超时时间（秒），防止 adb 卡死拖住 GUI 刷新线程。
+ADB_DEVICES_TIMEOUT_SEC = 6
+# 定义 adb 恢复命令超时时间（秒）。
+ADB_RECOVER_TIMEOUT_SEC = 4
 
 
 def _adb_executable_name() -> str:
@@ -262,21 +266,93 @@ def ensure_adb_environment() -> str:
     return resolve_adb_bin()
 
 
+def _parse_adb_server_addr() -> tuple[str, str]:
+    """解析 ADB_SERVER_ADDR，返回 host/port 字符串。"""
+    # 读取配置值并去除空白字符。
+    raw_addr = str(ADB_SERVER_ADDR or "").strip()
+    # 配置为空时回退标准本地 adb server。
+    if raw_addr == "":
+        # 返回默认 host/port。
+        return "127.0.0.1", "5037"
+    # 包含冒号时按 host:port 解析（只从最后一个冒号拆分，兼容异常输入）。
+    if ":" in raw_addr:
+        # 按最后一个冒号拆分 host 和 port。
+        host_part, port_part = raw_addr.rsplit(":", 1)
+        # 清理 host 空白，空值回退默认。
+        host_value = host_part.strip() or "127.0.0.1"
+        # 清理 port 空白，空值回退默认。
+        port_value = port_part.strip() or "5037"
+        # 返回解析结果。
+        return host_value, port_value
+    # 仅填了 host 时，port 回退 5037。
+    return raw_addr, "5037"
+
+
+def _build_adb_server_args() -> list[str]:
+    """构建 adb server 连接参数（-H/-P），确保命令和 Airtest 使用同一 server。"""
+    # 解析 host 和 port。
+    host_value, port_value = _parse_adb_server_addr()
+    # 组装命令参数列表。
+    return ["-H", host_value, "-P", port_value]
+
+
+def _recover_adb_server(adb_bin: str, server_args: list[str]) -> None:
+    """尝试恢复 adb server（kill/start），用于命令超时或冲突时自愈。"""
+    # 使用异常保护恢复流程，确保失败不会再次抛出阻断 UI。
+    try:
+        # 先尝试 kill-server 清理僵死 server。
+        subprocess.run(
+            [adb_bin, *server_args, "kill-server"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=ADB_RECOVER_TIMEOUT_SEC,
+            # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
+            **_hidden_subprocess_kwargs(),
+        )
+        # 再尝试 start-server 拉起干净 server。
+        subprocess.run(
+            [adb_bin, *server_args, "start-server"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=ADB_RECOVER_TIMEOUT_SEC,
+            # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
+            **_hidden_subprocess_kwargs(),
+        )
+        # 记录恢复动作日志。
+        log.warning("adb server 已执行恢复流程", server_addr=ADB_SERVER_ADDR)
+    # 恢复失败时仅记录日志，不再向上抛异常。
+    except Exception as exc:
+        # 记录恢复失败详情。
+        log.error("adb server 恢复失败", server_addr=ADB_SERVER_ADDR, error=str(exc))
+
+
+def _run_adb_devices(adb_bin: str, server_args: list[str]) -> subprocess.CompletedProcess[str]:
+    """执行 adb devices 命令并返回结果。"""
+    # 调用 adb devices 获取设备清单，并增加超时保护。
+    return subprocess.run(
+        [adb_bin, *server_args, "devices"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=ADB_DEVICES_TIMEOUT_SEC,
+        # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
+        **_hidden_subprocess_kwargs(),
+    )
+
+
 def list_online_serials() -> list[str]:
     """读取 adb 在线设备 serial 列表。"""
     try:
         # 先解析 adb 绝对路径，兼容 Finder 启动的 .app 环境。
         adb_bin = resolve_adb_bin()
-        # 调用 `adb devices` 获取设备清单。
-        result = subprocess.run(
-            [adb_bin, "devices"],
-            capture_output=True,
-            text=True,
-            check=True,
-            # Windows 下隐藏 adb 子进程窗口，避免界面闪烁。
-            **_hidden_subprocess_kwargs(),
-        )
-        log.debug("执行 adb devices 成功")
+        # 构建 server 参数，确保与 Airtest 使用同一 adb server。
+        server_args = _build_adb_server_args()
+        # 先执行一次 adb devices。
+        result = _run_adb_devices(adb_bin=adb_bin, server_args=server_args)
+        # 记录执行成功调试日志。
+        log.debug("执行 adb devices 成功", server_addr=ADB_SERVER_ADDR)
     except FileNotFoundError as exc:
         # 机器上没装 adb 或 PATH 里找不到 adb 时，给出清晰报错。
         log.exception("未找到 adb 命令")
@@ -284,6 +360,56 @@ def list_online_serials() -> list[str]:
             f"未找到 adb 命令，请确认 {ADB_BIN} 已安装并在 PATH 中，"
             "或设置 AUTOVT_ADB_BIN=/绝对路径/adb。"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        # 记录超时错误，提示可能存在 adb server 冲突或僵死。
+        log.error(
+            "adb devices 超时，尝试恢复 adb server",
+            server_addr=ADB_SERVER_ADDR,
+            timeout_sec=ADB_DEVICES_TIMEOUT_SEC,
+            error=str(exc),
+        )
+        # 执行一次 adb server 恢复流程。
+        _recover_adb_server(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+        # 恢复后再尝试一次 adb devices，仍失败时返回空列表避免卡住界面。
+        try:
+            # 再次执行 adb devices。
+            result = _run_adb_devices(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+            # 记录恢复后成功日志。
+            log.info("adb devices 重试成功", server_addr=ADB_SERVER_ADDR)
+        # 重试仍失败时按“无设备”处理，不抛异常阻断 GUI。
+        except Exception as retry_exc:
+            # 记录重试失败原因。
+            log.error("adb devices 重试失败，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(retry_exc))
+            # 返回空列表，避免刷新线程被异常中断。
+            return []
+    except subprocess.CalledProcessError as exc:
+        # 记录 adb 非零退出，通常是 server 状态异常。
+        log.error(
+            "adb devices 执行失败，尝试恢复 adb server",
+            server_addr=ADB_SERVER_ADDR,
+            returncode=int(getattr(exc, "returncode", -1)),
+            stderr=str(getattr(exc, "stderr", "")).strip(),
+            stdout=str(getattr(exc, "stdout", "")).strip(),
+        )
+        # 执行一次恢复流程。
+        _recover_adb_server(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+        # 恢复后再尝试一次，仍失败则返回空列表。
+        try:
+            # 再次执行 adb devices。
+            result = _run_adb_devices(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+            # 记录恢复后成功日志。
+            log.info("adb devices 恢复后成功", server_addr=ADB_SERVER_ADDR)
+        # 重试仍失败则按空列表处理，保证 GUI 不会卡住。
+        except Exception as retry_exc:
+            # 记录最终失败日志。
+            log.error("adb devices 恢复后仍失败，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(retry_exc))
+            # 返回空列表，避免阻断主流程。
+            return []
+    except Exception as exc:
+        # 记录未知异常，按空列表处理，避免刷新设备时界面卡住。
+        log.error("adb devices 未知异常，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(exc))
+        # 返回空列表，保证刷新链路稳定。
+        return []
 
     # 最终返回的在线设备 serial 列表。
     serials: list[str] = []

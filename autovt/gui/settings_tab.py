@@ -52,6 +52,10 @@ class SettingsTab:
             hint_text="请输入 0 到 5 的整数",
             width=320,
             keyboard_type=ft.KeyboardType.NUMBER,
+            # 限制最多输入 1 位数字，避免输入多位值。
+            max_length=1,
+            # 在 UI 输入层仅允许 0 到 5，直接拦截非法字符。
+            input_filter=ft.InputFilter(regex_string=r"[0-5]", allow=True),
             on_submit=self.save_config,
         )
         self.mojiwang_desc_text = ft.Text(value=MOJIWANG_RUN_NUM_DESC, size=13, color=ft.Colors.BLUE_GREY_700)

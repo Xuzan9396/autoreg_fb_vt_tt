@@ -12,6 +12,9 @@ autovt/
 ├── autovt/
 │   ├── __init__.py
 │   ├── adb.py
+│   ├── auth/
+│   │   ├── __init__.py
+│   │   └── login_service.py
 │   ├── cli.py
 │   ├── gui/
 │   │   ├── __init__.py
@@ -47,16 +50,19 @@ autovt/
 
 - `main.py`：主入口（默认 GUI），支持 `--mode cli` 回退命令行模式。
 - `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）。
+- `autovt/auth/login_service.py`：登录服务模块；对齐 Go 版登录协议（AES-GCM + `/bit_login`），并提供本地账号密码缓存（下次启动自动回填）。
 - `autovt/gui/__init__.py`：GUI 包导出入口（`run_gui`）。
 - `autovt/cli.py`：命令行交互层（用于 `--mode cli` 回退场景）。
 - `autovt/logs.py`：统一日志初始化（终端+文件 JSON、日志级别、第三方 debug 开关）。
 - `autovt/multiproc/manager.py`：主进程生命周期管理。
 - `autovt/multiproc/worker.py`：单设备子进程执行循环。
 - `autovt/runtime.py`：子进程内 Airtest/Poco 初始化，并维护“进程内 Poco 单例”（`create_poco()` / `get_poco()`）；`setup_device()` 会把解析出的 `adb_path` 注入设备 URI，避免被外部常驻 adb 进程劫持，并记录 `auto_setup/create_poco` 耗时日志。
-- `autovt/adb.py`：ADB 设备发现和设备 URI 组装（默认优先项目内置 `adb/mac` 与 `adb/windows`，并支持 `AUTOVT_ADB_BIN` 覆盖，兼容打包后 PATH 缺失场景）；`build_device_uri()` 支持传入 `adb_path` 强制 Airtest 走指定 adb。
+- `autovt/adb.py`：ADB 设备发现和设备 URI 组装（默认优先项目内置 `adb/mac` 与 `adb/windows`，并支持 `AUTOVT_ADB_BIN` 覆盖，兼容打包后 PATH 缺失场景）；`build_device_uri()` 支持传入 `adb_path` 强制 Airtest 走指定 adb；`list_online_serials()` 已增加 `adb devices` 超时与 `kill-server/start-server` 自愈，避免 adb 冲突导致 GUI 卡住。
+- `autovt/emails/emails.py`：邮箱验证码主入口，提供 `getfackbook_code(client_id, email_name, refresh_token, is_debug=False)`，负责刷新 token、拉取邮件、提取验证码。
+- `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
 - `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）。
@@ -242,7 +248,11 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - `status`：`0=未使用`、`1=正在使用`、`2=已经使用`、`3=账号问题`
 - 设置 Tab：读取 `t_config` 并支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`
 - `mojiwang_run_num` 规则：仅允许 `1~100` 整数
-- `status_23_retry_max_num` 规则：仅允许 `0~5` 整数（`0`=不重试）
+- `status_23_retry_max_num` 规则：仅允许 `0~5` 整数（`0`=不重试，`1`=重试 1 次，`3`=重试 3 次，最大 `5` 次）
+- 设置 Tab 的 `status_23_retry_max_num` 输入框在 Flet UI 层已加输入限制：仅允许输入 `0~5` 单个数字
+- 登录页：默认走加密 API 登录；当环境变量 `GITXUZAN_LOGIN=1` 时跳过 API 登录校验（任意账号密码可登录）
+- 登录页：登录成功后会写入本地缓存，重新打开软件自动回填上次账号密码
+- 登录页：`401 Unauthorized` 按“账号或密码错误”处理，只打印告警日志，不输出异常堆栈
 - `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`（缺失时自动补齐）
 - GUI 已去掉：`once/run_once` 单轮手动触发入口
 
@@ -252,7 +262,7 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 账号领取使用 SQLite 事务写锁（`BEGIN IMMEDIATE`）保证并发安全，避免多设备抢到同一账号
 - 同一时刻每条 `t_user` 只会被一个设备占用（通过 `status+device` 双条件控制）
 - 当当前账号仍为 `status=1` 时，worker 会持续复用同一账号执行，不会切换新账号
-- 当当前账号变为 `status=2/3` 时，worker 会按 `status_23_retry_max_num` 对同一账号重试；超过上限后才释放并切换新账号
+- 当当前账号变为 `status=2/3` 时，worker 会按 `status_23_retry_max_num` 对同一账号执行对应次数的“额外重试”（例如配置 `3` 就额外重试 `3` 次）；超过上限后才释放并切换新账号
 - 若无可用账号（无 `status=0`），worker 进入 `waiting` 状态并睡眠等待，不执行自动化任务
 - 当后续有新可用账号写入后，worker 会自动继续领取并执行任务
 - 停止设备时释放规则：
@@ -269,6 +279,8 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 只调 Facebook：`python test.py facebook_run_all`
 - 只调 Nekobox：`python test.py nekobox_run_all 0`（`0=动态`，`1=移动`）
 - 只跑抹机王某一轮：`python test.py mojiwang_run_one_loop 0`
+- Facebook 头像随机选图：`OpenSettingsTask.facebook_select_img()` 在头像相册里固定跳过索引 `0`（非图片），并按 `1..min(9, x)` 随机点击（`x=图片数量`）
+- Facebook 头像随机选图分支：若命中“添加图片”弹框，会直接进入相册授权步骤；未命中时才走 `首页头像按钮v2` + `打开底部相册` 的常规路径
 
 ## test.py 全局异常兜底
 
