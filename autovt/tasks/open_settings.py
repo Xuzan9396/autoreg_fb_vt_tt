@@ -1341,6 +1341,12 @@ class OpenSettingsTask:
             if self._safe_wait_exists(cookie_button, 5, "接受 cookie 按钮"):
                 self._safe_click(cookie_button, "接受 cookie 按钮", sleep_interval=5)
 
+            allow_button = poco("com.android.permissioncontroller:id/permission_allow_button")
+
+            # 安全等待权限按钮。
+            if self._safe_wait_exists(allow_button, 2, "系统权限允许按钮v3"):
+                # 点击权限按钮后等待 1 秒。
+                self._safe_click(allow_button, "系统权限允许按钮v3", sleep_interval=2)
 
             menu_tab_node = poco(desc=FACEBOOK_MENU_TAB_DESC[self.device_lang])
             if not self._safe_wait_exists(menu_tab_node,5,"三条杆菜单"):
