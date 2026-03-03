@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 import inspect
+import platform
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 import flet as ft
+from openpyxl import Workbook
 
-from autovt.gui.account_importer import AccountFileImporter, NAME_COUNTRY_OPTIONS
+from autovt.gui.account_importer import AccountFileImporter, IMPORT_SPLITTER, NAME_COUNTRY_OPTIONS
 from autovt.gui.helpers import (
     ACCOUNT_PAGE_SIZE,
     VT_PWD_KEY,
@@ -21,6 +26,7 @@ from autovt.gui.helpers import (
     register_status_text,
 )
 from autovt.logs import get_logger
+from autovt.settings import RUNTIME_DATA_DIR
 from autovt.userdb import UserDB, UserRecord
 
 log = get_logger("gui.account")
@@ -150,6 +156,7 @@ class AccountTab:
             controls=[
                 ft.FilledButton("新增账号", icon=ft.Icons.ADD, on_click=self._open_create_dialog),
                 ft.FilledButton("刷新账号", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
+                ft.OutlinedButton("一键导出", icon=ft.Icons.DOWNLOAD, on_click=self._handle_export_filtered_accounts),
                 import_country_selector,
                 ft.OutlinedButton("一键导入文件", icon=ft.Icons.UPLOAD_FILE, on_click=self._pick_import_file),
             ],
@@ -392,6 +399,218 @@ class AccountTab:
             self.titok_filter_dropdown.value = ""
         self._page_index = 1
         self.refresh(source="filter_reset", show_toast=False)
+
+    # 定义“导出按钮点击入口”方法。
+    def _handle_export_filtered_accounts(self, _e: ft.ControlEvent | None = None) -> None:
+        # 在 Flet 事件线程调度异步导出任务。
+        try:
+            # 调度“按当前筛选导出账号”任务。
+            self.page.run_task(self._export_filtered_accounts_async)
+        # 调度失败时记录异常并提示。
+        except Exception as exc:
+            # 打印完整异常栈，便于定位事件线程问题。
+            log.exception("调度账号导出任务失败", error=str(exc))
+            # 给用户可读错误提示。
+            self._show_snack(f"导出任务启动失败: {exc}")
+
+    # 定义“按当前筛选条件拉取导出数据”方法。
+    def _list_filtered_rows_for_export(self) -> list[dict[str, Any]]:
+        # 读取当前筛选控件值（邮箱关键字 + 4 种状态）。
+        email_kw, status_f, fb_f, vinted_f, titok_f = self._get_filter_values()
+        # 查询当前筛选命中的总条数。
+        total_count = self.user_db.count_users_filtered(
+            # 传入邮箱关键字筛选参数。
+            email_keyword=email_kw,
+            # 传入账号状态筛选参数。
+            status=status_f,
+            # 传入 FB 状态筛选参数。
+            fb_status=fb_f,
+            # 传入 VT 状态筛选参数。
+            vinted_status=vinted_f,
+            # 传入 TT 状态筛选参数。
+            titok_status=titok_f,
+        )
+        # 没有命中数据时返回空列表。
+        if int(total_count) <= 0:
+            return []
+        # 查询全部命中数据用于导出（不走分页）。
+        return self.user_db.list_users_filtered(
+            # 使用筛选总数作为导出上限。
+            limit=int(total_count),
+            # 从第 0 条开始导出。
+            offset=0,
+            # 传入邮箱关键字筛选参数。
+            email_keyword=email_kw,
+            # 传入账号状态筛选参数。
+            status=status_f,
+            # 传入 FB 状态筛选参数。
+            fb_status=fb_f,
+            # 传入 VT 状态筛选参数。
+            vinted_status=vinted_f,
+            # 传入 TT 状态筛选参数。
+            titok_status=titok_f,
+        )
+
+    # 定义“组装 outlook 导出字段”的方法。
+    @staticmethod
+    def _build_outlook_export_field(row: dict[str, Any]) -> str:
+        # 读取邮箱账号字段。
+        email_account = str(row.get("email_account", ""))
+        # 读取邮箱密码字段。
+        email_pwd = str(row.get("email_pwd", ""))
+        # 读取微软 OAuth client_id 字段。
+        client_id = str(row.get("client_id", ""))
+        # 读取邮箱授权码字段。
+        email_access_key = str(row.get("email_access_key", ""))
+        # 按导入同款分隔符拼回 outlook 一整段字段。
+        return IMPORT_SPLITTER.join([email_account, email_pwd, client_id, email_access_key])
+
+    # 定义“构建导出二维表格数据”的方法。
+    def _build_export_table_rows(self, rows: list[dict[str, Any]]) -> list[list[str | int]]:
+        # 初始化导出二维表数组。
+        export_table_rows: list[list[str | int]] = []
+        # 先写入表头行。
+        export_table_rows.append(["id", "账号", "账号状态", "FB状态", "VT状态", "TT状态", "pwd", "msg", "outlook"])
+        # 逐行写入数据。
+        for row in rows:
+            # 读取账号状态值。
+            status_val = int(row.get("status", 0))
+            # 读取 FB 状态值。
+            fb_val = int(row.get("fb_status", 0))
+            # 读取 VT 状态值。
+            vinted_val = int(row.get("vinted_status", 0))
+            # 读取 TT 状态值。
+            titok_val = int(row.get("titok_status", 0))
+            # 追加当前账号导出行。
+            export_table_rows.append(
+                [
+                    # 账号主键 ID。
+                    int(row.get("id", 0)),
+                    # 邮箱账号。
+                    str(row.get("email_account", "")),
+                    # 账号状态（数值 + 文案）。
+                    f"{status_val} {account_status_text(status_val)}",
+                    # FB 状态（数值 + 文案）。
+                    f"{fb_val} {register_status_text(fb_val)}",
+                    # VT 状态（数值 + 文案）。
+                    f"{vinted_val} {register_status_text(vinted_val)}",
+                    # TT 状态（数值 + 文案）。
+                    f"{titok_val} {register_status_text(titok_val)}",
+                    # vinted 密码。
+                    str(row.get("pwd", "")),
+                    # 备注信息。
+                    str(row.get("msg", "")),
+                    # 微软账号拼接字段。
+                    self._build_outlook_export_field(row),
+                ]
+            )
+        # 返回导出二维表。
+        return export_table_rows
+
+    # 定义“把导出二维表转为 TSV 剪贴板文本”的方法。
+    @staticmethod
+    def _build_export_tsv(export_table_rows: list[list[str | int]]) -> str:
+        # 创建内存文本缓冲区，避免手写转义逻辑。
+        buffer = io.StringIO()
+        # 创建 TSV 写入器（使用制表符分隔）。
+        writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+        # 逐行写入二维表。
+        writer.writerows(export_table_rows)
+        # 返回最终 TSV 文本。
+        return buffer.getvalue()
+
+    # 定义“保存导出数据到 xlsx 文件”的方法。
+    @staticmethod
+    def _save_export_file(export_table_rows: list[list[str | int]]) -> Path:
+        # 读取当前系统名称并转小写，便于分平台处理。
+        system_name = platform.system().lower()
+        # macOS 默认导出到下载目录。
+        if system_name == "darwin":
+            # 指定 macOS 导出目录为用户 Downloads。
+            export_dir = Path.home() / "Downloads"
+        # Windows 默认导出到当前用户桌面目录。
+        elif system_name.startswith("win"):
+            # 指定 Windows 导出目录为用户 Desktop。
+            export_dir = Path.home() / "Desktop"
+        # 其他系统走运行期目录兜底。
+        else:
+            # 指定兜底导出目录为运行期 exports 目录。
+            export_dir = Path(RUNTIME_DATA_DIR) / "exports"
+        # 尝试创建导出目录。
+        try:
+            # 创建导出目录（不存在则自动创建）。
+            export_dir.mkdir(parents=True, exist_ok=True)
+        # 创建目录失败时回退到运行期目录兜底。
+        except Exception as exc:
+            # 记录目录创建失败日志，便于定位权限问题。
+            log.exception("创建导出目录失败，回退运行期目录", export_dir=str(export_dir), error=str(exc))
+            # 回退导出目录到运行期 exports。
+            export_dir = Path(RUNTIME_DATA_DIR) / "exports"
+            # 确保兜底目录存在。
+            export_dir.mkdir(parents=True, exist_ok=True)
+        # 生成当前时间戳字符串作为文件名后缀。
+        time_text = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        # 组装导出文件完整路径。
+        export_path = export_dir / f"accounts_export_{time_text}.xlsx"
+        # 创建 Excel 工作簿对象。
+        workbook = Workbook()
+        # 获取默认工作表对象。
+        worksheet = workbook.active
+        # 设置工作表名称。
+        worksheet.title = "accounts"
+        # 写入导出二维表到工作表。
+        for export_row in export_table_rows:
+            # 按行追加到 Excel。
+            worksheet.append(export_row)
+        # 冻结首行，方便查看表头。
+        worksheet.freeze_panes = "A2"
+        # 保存 xlsx 文件到目标路径。
+        workbook.save(str(export_path))
+        # 关闭工作簿句柄，释放文件资源。
+        workbook.close()
+        # 返回导出文件路径给调用方。
+        return export_path
+
+    # 定义“异步执行导出并复制剪贴板”的方法。
+    async def _export_filtered_accounts_async(self) -> None:
+        # 使用异常保护导出流程，保证界面不崩溃。
+        try:
+            # 按当前筛选读取全部命中数据。
+            rows = self._list_filtered_rows_for_export()
+            # 无数据时直接提示并结束。
+            if len(rows) == 0:
+                self._show_snack("当前筛选条件下没有可导出的账号。")
+                return
+            # 构建导出二维表数据。
+            export_table_rows = self._build_export_table_rows(rows)
+            # 构建导出文本内容。
+            export_text = self._build_export_tsv(export_table_rows)
+            # 保存导出文件到运行期目录。
+            export_path = self._save_export_file(export_table_rows)
+            # 先标记剪贴板复制是否成功。
+            clipboard_ok = False
+            # 尝试把导出文本复制到系统剪贴板。
+            try:
+                # 调用 Flet Clipboard 服务写入文本。
+                await self.page.clipboard.set(export_text)
+                # 标记复制成功。
+                clipboard_ok = True
+            # 复制失败时记录日志并继续保留文件导出结果。
+            except Exception as exc:
+                # 打印异常栈，便于排查系统剪贴板权限问题。
+                log.exception("账号导出复制到剪贴板失败", error=str(exc))
+            # 复制成功时提示“文件+剪贴板”都可用。
+            if clipboard_ok:
+                self._show_snack(f"导出成功：{len(rows)} 条，已复制剪贴板，文件: {export_path}")
+                return
+            # 复制失败时提示用户文件路径仍可用。
+            self._show_snack(f"导出成功：{len(rows)} 条，剪贴板失败，文件: {export_path}")
+        # 捕获导出主流程异常并提示。
+        except Exception as exc:
+            # 记录完整异常栈，满足“每个错误记录日志”要求。
+            log.exception("账号导出失败", error=str(exc))
+            # 给用户可读错误提示。
+            self._show_snack(f"导出失败: {exc}")
 
     # ═══════════════════════════════════════════════════════════════════
     # 表单弹窗 (新增 / 编辑)

@@ -14,6 +14,7 @@ dependencies = [
     "pyinstaller>=6.18.0",
     "cryptography>=46.0.5",
     "faker>=40.5.1",
+    "openpyxl>=3.1.5",
 ]
 
 # --- 核心魔法区域 ---

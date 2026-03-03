@@ -251,6 +251,14 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 账号 Tab：导入可选姓名国家（法国/英国/美国/德国/西班牙/意大利），并使用 Faker 自动生成 `first_name/last_name`
 - 账号 Tab：导入时 `pwd` 统一取全局 `vt_pwd`；未配置 `vt_pwd` 时会提示先设置
 - 账号 Tab：`email_access_key` 列表展示时只显示前 10 位，其余 `...`
+- 账号 Tab：支持“一键导出”（按当前筛选条件导出全部命中数据，不受分页影响）
+- 账号 Tab：导出字段为 `id`、`账号`、`账号状态`、`FB状态`、`VT状态`、`TT状态`、`pwd`、`msg`、`outlook`
+- 账号 Tab：导出 `outlook` 字段格式为 `email_account----email_pwd----client_id----email_access_key`（按导入同款 `----` 连接）
+- 账号 Tab：一键导出文件路径按系统区分：
+- macOS：`~/Downloads/accounts_export_时间戳.xlsx`
+- Windows：`~/Desktop/accounts_export_时间戳.xlsx`
+- 其他系统：`RUNTIME_DATA_DIR/exports/accounts_export_时间戳.xlsx`
+- 账号 Tab：导出完成后会尝试把全部导出文本复制到系统剪贴板
 - 账号 Tab 状态文案：
 - `fb_status/vinted_status/titok_status`：`0=未注册`、`1=成功`、`2=失败`
 - `status`：`0=未使用`、`1=正在使用`、`2=已经使用`、`3=账号问题`

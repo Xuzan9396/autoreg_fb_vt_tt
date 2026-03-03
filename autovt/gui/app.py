@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import os
 import platform
+import signal
 import sys
 from pathlib import Path
 from typing import Callable
@@ -388,10 +389,64 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
                 os.environ["FLET_PLATFORM"] = "windows"
                 log.info("检测到 Windows 打包运行，已设置 FLET_PLATFORM", value=os.environ["FLET_PLATFORM"])
 
+    # 缓存当前 GUI 应用实例，供 Ctrl+C 信号处理时复用停机逻辑。
+    app_holder: dict[str, AutoVTGuiApp | None] = {"app": None}
+    # 记录是否已处理过 Ctrl+C，避免重复执行停机。
+    sigint_handled = False
+    # 保存旧的 SIGINT 处理器，退出时恢复。
+    old_sigint_handler = signal.getsignal(signal.SIGINT)
+
+    # 定义 Ctrl+C 信号处理方法。
+    def _handle_sigint(_signum: int, _frame: object | None) -> None:
+        # 声明要修改外层标记变量。
+        nonlocal sigint_handled
+        # 已处理过时直接返回，防止重复 stop_all。
+        if sigint_handled:
+            return
+        # 标记已处理，后续信号不再重复执行。
+        sigint_handled = True
+        # 记录中断日志，便于排查停机链路。
+        log.warning("GUI 收到 Ctrl+C，准备停止全部并退出")
+        # 读取当前 GUI 应用实例。
+        app = app_holder.get("app")
+        # 存在应用实例时先执行优雅停机。
+        if app is not None:
+            # 使用异常保护停机流程，避免中断时再次抛栈。
+            try:
+                # 复用现有退出清理逻辑（stop_all + close）。
+                app._shutdown()
+            # 停机失败时记录日志，但仍继续退出进程。
+            except Exception:
+                # 打印完整异常栈，满足错误可追踪。
+                log.exception("Ctrl+C 停机清理失败")
+        # 以中断退出码强制结束进程，避免 Flet 事件循环继续阻塞。
+        raise SystemExit(130)
+
+    # 把 Ctrl+C 绑定到当前自定义处理器。
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+    # 定义 Flet 入口回调。
     def _main(page: ft.Page) -> None:
+        # 创建 GUI 应用实例。
         app = AutoVTGuiApp(page=page, loop_interval_sec=loop_interval_sec)
+        # 缓存应用实例，供 Ctrl+C 处理器停机使用。
+        app_holder["app"] = app
+        # 启动 GUI 页面。
         app.start()
-    ft.app(target=_main, assets_dir="assets")
+
+    # 执行 Flet 事件循环。
+    try:
+        # 启动 Flet 应用主循环。
+        ft.app(target=_main, assets_dir="assets")
+    # 捕获 Ctrl+C 触发的 SystemExit，避免额外 traceback。
+    except SystemExit as exc:
+        # 仅在中断退出码场景吞掉异常，其它退出码继续抛出。
+        if int(getattr(exc, "code", 0) or 0) != 130:
+            raise
+    # 退出时恢复原始 SIGINT 处理器。
+    finally:
+        # 恢复调用 run_gui 之前的 SIGINT 行为。
+        signal.signal(signal.SIGINT, old_sigint_handler)
 
 
 def main() -> None:

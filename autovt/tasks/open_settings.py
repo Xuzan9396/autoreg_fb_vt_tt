@@ -866,7 +866,7 @@ class OpenSettingsTask:
             # self.log.info("任务结束，已停止应用", package=self.nekobox_package)
 
     # 定义“获取 Facebook 验证码”的复用方法（带重试）。
-    def _fetch_facebook_code(self, retry_times: int = 3, wait_seconds: int = 25) -> str | None:
+    def _fetch_facebook_code(self, retry_times: int = 5, wait_seconds: int = 15) -> str | None:
         # 校验 client_id 是否存在，缺失时直接返回失败。
         if not self.user_info.get("client_id"):
             # 记录 client_id 缺失错误。
