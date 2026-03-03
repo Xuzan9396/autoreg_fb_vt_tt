@@ -305,6 +305,128 @@ class OpenSettingsTask:
 
         return self._safe_click(node,desc,sleep_interval=sleep_interval)
 
+    # 定义“在短超时内探测并点击弹框节点”的方法。
+    def _safe_probe_and_click_popup(
+        self,
+        node: Any,
+        desc: str,
+        timeout_sec: float = 1.2,
+        poll_interval_sec: float = 0.2,
+    ) -> bool:
+        # 记录本次探测开始时间。
+        started_at = time.monotonic()
+        # 在超时窗口内循环探测节点是否出现。
+        while time.monotonic() - started_at <= max(0.0, timeout_sec):
+            # 使用异常保护 exists 查询，避免弹框探测导致主流程崩溃。
+            try:
+                # 当前节点存在时尝试点击并返回结果。
+                if bool(node.exists()):
+                    # 点击成功时返回 True。
+                    if self._safe_click(node, desc, sleep_interval=0.8):
+                        return True
+            # 捕获查询异常并按失败处理。
+            except Exception as exc:
+                # 统一记录异常并尝试恢复连接。
+                self._handle_safe_action_exception("probe_popup_exists", desc, exc)
+                # 当前节点探测异常时按未点击处理。
+                return False
+            # 两次探测之间短暂休眠，避免空转过快。
+            sleep(max(0.0, poll_interval_sec))
+        # 超时未命中时返回 False。
+        return False
+
+    # 定义“处理 Facebook 干扰弹框”的方法。
+    def _handle_facebook_blocking_popups(self, poco: Any) -> bool:
+        # 标记是否至少点击过一个干扰弹框。
+        clicked_any_popup = False
+        # 组合常见系统权限弹框候选节点（跨 ROM 兼容）。
+        popup_candidates: list[tuple[Any, str]] = [
+            # Android 12+ 常见权限允许按钮。
+            (poco("com.android.permissioncontroller:id/permission_allow_button"), "Facebook-干扰弹框-系统权限允许按钮"),
+            # 通用系统确认按钮（很多弹框共用 android:id/button1）。
+            (poco("android:id/button1"), "Facebook-干扰弹框-系统确认按钮"),
+            # 旧版 packageinstaller 权限允许按钮。
+            (poco("com.android.packageinstaller:id/permission_allow_button"), "Facebook-干扰弹框-旧版权限允许按钮"),
+        ]
+        # 连续扫描多轮，兼容“一个弹框点完又弹下一个”的场景。
+        for round_index in range(3):
+            # 标记当前轮是否有命中弹框。
+            clicked_in_round = False
+            # 逐个尝试点击候选弹框。
+            for node, desc in popup_candidates:
+                # 在短超时内探测并点击当前候选弹框。
+                if self._safe_probe_and_click_popup(node=node, desc=f"{desc}-第{round_index + 1}轮", timeout_sec=1.0):
+                    # 标记本轮命中。
+                    clicked_in_round = True
+                    # 标记总流程命中。
+                    clicked_any_popup = True
+            # 本轮未命中时提前结束扫描。
+            if not clicked_in_round:
+                break
+            # 本轮命中后稍等，让下一层弹框有机会渲染出来。
+            sleep(0.4)
+        # 命中过弹框时记录恢复日志。
+        if clicked_any_popup:
+            # 记录恢复动作，便于回溯“为什么会走重试”。
+            self.log.info("已处理 Facebook 干扰弹框，准备继续流程")
+        # 返回是否处理过干扰弹框。
+        return clicked_any_popup
+
+    # 定义“步骤失败后处理弹框并重试一次”的通用方法。
+    def _facebook_retry_step_after_popup(
+        self,
+        poco: Any,
+        step_desc: str,
+        fail_reason: str,
+        retry_action: Any,
+    ) -> bool:
+        # 记录步骤失败，准备尝试弹框恢复。
+        self.log.warning("Facebook 步骤失败，准备处理弹框后重试", step=step_desc, reason=fail_reason)
+        # 先尝试处理干扰弹框。
+        handled_popup = self._handle_facebook_blocking_popups(poco)
+        # 未发现干扰弹框时直接按原失败原因返回。
+        if not handled_popup:
+            # 返回失败并记录原失败原因。
+            return self._facebook_fail(fail_reason)
+        # 执行当前步骤的一次重试。
+        try:
+            # 重试成功时直接返回 True。
+            if bool(retry_action()):
+                # 记录步骤重试成功日志。
+                self.log.info("Facebook 步骤重试成功", step=step_desc)
+                return True
+        # 捕获重试异常并统一处理，不抛出到外层。
+        except Exception as exc:
+            # 记录异常并尝试恢复连接。
+            self._handle_safe_action_exception("facebook_step_retry", step_desc, exc)
+        # 重试后仍失败时按原失败原因返回。
+        return self._facebook_fail(fail_reason)
+
+    # 定义“安全动作失败时按步骤重试并统一返回”的方法。
+    def _facebook_action_or_fail(
+        self,
+        poco: Any,
+        step_desc: str,
+        fail_reason: str,
+        action: Any,
+    ) -> bool:
+        # 先尝试执行当前步骤动作。
+        try:
+            # 动作成功时直接返回 True。
+            if bool(action()):
+                return True
+        # 动作异常时统一记录，不让流程崩溃。
+        except Exception as exc:
+            # 记录异常并尝试恢复连接。
+            self._handle_safe_action_exception("facebook_step_action", step_desc, exc)
+        # 首次动作失败时，尝试处理弹框并仅重试当前步骤一次。
+        return self._facebook_retry_step_after_popup(
+            poco=poco,
+            step_desc=step_desc,
+            fail_reason=fail_reason,
+            retry_action=action,
+        )
+
     # 定义“安全点击 Facebook 深层 next 节点”的方法。
     def _safe_click_facebook_next_v2_deep(self, poco: Any) -> bool:
         # 使用异常保护构建深层节点，避免索引越界导致流程崩溃。
@@ -941,6 +1063,15 @@ class OpenSettingsTask:
         # self.clear_all()
         # 获取当前任务实例中的 Poco 对象。
         poco = self._require_poco()
+        # 定义当前方法内的步骤封装，统一“失败后处理弹框并仅重试该步骤一次”。
+        def _run_step_or_fail(step_desc: str, fail_reason: str, action: Any) -> bool:
+            # 调用统一封装执行步骤，失败时内部会自动写入失败原因并返回 False。
+            return self._facebook_action_or_fail(
+                poco=poco,
+                step_desc=step_desc,
+                fail_reason=fail_reason,
+                action=action,
+            )
         # 启动 Facebook 应用。
         start_app(self.facebook_package)
         # 记录启动成功日志。
@@ -994,9 +1125,13 @@ class OpenSettingsTask:
             # 定位“创建账号第 2 页”按钮。
             create_user_page2_node = poco(FACEBOOK_CREATE_USER_BUTTON_PAGE2[self.device_lang])
             # 等待第 2 页按钮出现。
-            if not self._safe_wait_exists(create_user_page2_node, 35, "Create New Facebook Account 按钮2"):
-                # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到 Create New Facebook Account 按钮2")
+            if not _run_step_or_fail(
+                step_desc="等待 Create New Facebook Account 按钮2",
+                fail_reason="未找到 Create New Facebook Account 按钮2",
+                action=lambda: self._safe_wait_exists(create_user_page2_node, 35, "Create New Facebook Account 按钮2"),
+            ):
+                # 步骤失败且重试后仍失败时，直接结束当前流程。
+                return False
             # 点击第 2 页按钮。
             self._safe_click(create_user_page2_node, "Create New Facebook Account 按钮2", sleep_interval=2)
         # 未命中创建账号按钮时走启动按钮分支。
@@ -1030,11 +1165,15 @@ class OpenSettingsTask:
             return self._facebook_fail("First name 为空，无法输入")
 
         # 直接向当前焦点输入 first name（不依赖节点）。
-        if not self._safe_input_on_focused(self.user_first_name, "First name-当前焦点"):
+        if not _run_step_or_fail(
+            step_desc="输入 First name",
+            fail_reason="First name 焦点输入失败",
+            action=lambda: self._safe_input_on_focused(self.user_first_name, "First name-当前焦点"),
+        ):
             # 记录失败并结束流程。
             self.log.info("First name 焦点输入失败，跳过后续操作")
             # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("First name 焦点输入失败")
+            return False
         # 读取当前语言的 last name 占位文案，用于点击聚焦输入框。
         last_name_desc = FACEBOOK_LAST_NAME_INPUT.get(self.device_lang)
         
@@ -1054,10 +1193,20 @@ class OpenSettingsTask:
 
         # 如果还没成功聚焦 last name。
         if not focused_last_name:
-            # 记录尝试按键切换。
-            self.log.error("Last name 输入框节点不可点击，尝试按键切换聚焦")
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("Last name 输入框节点不可点击")
+            # 通过步骤封装重试一次 last name 聚焦动作。
+            if not _run_step_or_fail(
+                step_desc="聚焦 Last name 输入框节点",
+                fail_reason="Last name 输入框节点不可点击",
+                action=lambda: (
+                    bool(last_name_desc)
+                    and self._safe_wait_exists(poco(text=last_name_desc), 2, "Last name 输入框节点-重试")
+                    and self._safe_click(poco(text=last_name_desc), "Last name 输入框-点击聚焦-重试", sleep_interval=0.6)
+                ),
+            ):
+                # 步骤失败且重试后仍失败时，直接结束当前流程。
+                return False
+            # 重试成功后标记聚焦完成。
+            focused_last_name = True
 
         # 无论哪种聚焦方式都额外等待一会儿，确保焦点稳定后再输入。
         sleep(0.8)
@@ -1068,11 +1217,15 @@ class OpenSettingsTask:
             # 返回失败并记录具体错误原因。
             return self._facebook_fail("Last name 为空，无法输入")
         # 继续向当前焦点输入 last name（不依赖节点）。
-        if not self._safe_input_on_focused(self.user_last_name, "Last name-当前焦点"):
+        if not _run_step_or_fail(
+            step_desc="输入 Last name",
+            fail_reason="Last name 焦点输入失败",
+            action=lambda: self._safe_input_on_focused(self.user_last_name, "Last name-当前焦点"),
+        ):
             # 记录失败并结束流程。
             self.log.info("Last name 焦点输入失败，结束本轮输入")
             # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("Last name 焦点输入失败")
+            return False
         # 输入完成后稍等，确保输入事件处理完毕
         sleep(0.5)
 
@@ -1082,17 +1235,25 @@ class OpenSettingsTask:
         # 根据占位文案定位 last name 区域节点。
         next_node = poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang])
         # 等待 last name 节点出现。
-        if not self._safe_wait_exists(next_node, 1, "next输入点"):
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("未找到 next 输入点")
+        if not _run_step_or_fail(
+            step_desc="等待名字页 next 输入点",
+            fail_reason="未找到 next 输入点",
+            action=lambda: self._safe_wait_exists(next_node, 1, "next输入点"),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         # 先点击 last name 节点聚焦
         self._safe_click(next_node, "next输入点点击", sleep_interval=2)
 
-        if  self._safe_wait_exists(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), 2, "输入名字后继续找到 next 说明需要确认名称了"):
-            if not self._safe_click_facebook_next_v2_deep(poco):
-                # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到 next 输入点v2（深层路径）或点击失败")
+        if self._safe_wait_exists(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), 2, "输入名字后继续找到 next 说明需要确认名称了"):
+            if not _run_step_or_fail(
+                step_desc="点击名字确认页 deep next 节点",
+                fail_reason="未找到 next 输入点v2（深层路径）或点击失败",
+                action=lambda: self._safe_click_facebook_next_v2_deep(poco),
+            ):
+                # 步骤失败且重试后仍失败时，直接结束当前流程。
+                return False
 
 
 
@@ -1101,17 +1262,25 @@ class OpenSettingsTask:
         # 根据占位文案定位 last name 区域节点
         year_node = poco(text=str(year))
         # 等待 last name 节点出现。
-        if not self._safe_wait_exists(year_node, 5, "year输入点:" + str(year)):
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail(f"未找到年份输入点: {year}")
+        if not _run_step_or_fail(
+            step_desc=f"等待年份输入点-{year}",
+            fail_reason=f"未找到年份输入点: {year}",
+            action=lambda: self._safe_wait_exists(year_node, 5, "year输入点:" + str(year)),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
         # 先点击 last name 节点聚焦
         self._safe_click(year_node, "year输入点点击", sleep_interval=2)
 
 
         # 继续向当前焦点输入 last name（不依赖节点）。
-        if not self._safe_input_on_focused("1996", "年份",True):
-            # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("年份输入失败")
+        if not _run_step_or_fail(
+            step_desc="输入年份",
+            fail_reason="年份输入失败",
+            action=lambda: self._safe_input_on_focused("1996", "年份", True),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         # 先点击 last name 节点聚焦
         self._safe_click(poco(text=FACEBOOK_YEAR_SET[self.device_lang]), "年份 set 点击", sleep_interval=2)
@@ -1122,9 +1291,13 @@ class OpenSettingsTask:
         # 根据占位文案定位 男性 输入节点
         gender_node = poco(text=FACEBOOK_GENDER_MALE[self.device_lang])
         # 等待 男性 输入节点 出现。
-        if not self._safe_wait_exists(gender_node, 2, "性别找不到"):
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("未找到性别选择节点（男性）")
+        if not _run_step_or_fail(
+            step_desc="等待性别选择节点（男性）",
+            fail_reason="未找到性别选择节点（男性）",
+            action=lambda: self._safe_wait_exists(gender_node, 2, "性别找不到"),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         # 点击 男性 输入节点 聚焦并选择
         self._safe_click(gender_node, "性别-男性-点击", sleep_interval=2)
@@ -1135,27 +1308,39 @@ class OpenSettingsTask:
 
         email_node = poco(text=FACEBOOK_SELECT_EMAIL_SIGN_UP[self.device_lang])
         # 等待选择邮箱注册按钮出现。
-        if not self._safe_wait_exists(email_node, 30, "选择邮箱注册按钮"):
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("未找到选择邮箱注册按钮")
+        if not _run_step_or_fail(
+            step_desc="等待选择邮箱注册按钮",
+            fail_reason="未找到选择邮箱注册按钮",
+            action=lambda: self._safe_wait_exists(email_node, 30, "选择邮箱注册按钮"),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
         # 点击选择邮箱注册按钮
         self._safe_click(email_node, "选择邮箱注册按钮", sleep_interval=2)
         # 定位邮箱输入框
         email_input_node = poco(text=FACEBOOK_EMAIL_INPUT[self.device_lang])
         # 等待邮箱输入框出现。
-        if not self._safe_wait_exists(email_input_node, 4, "邮箱输入框"):
+        if not _run_step_or_fail(
+            step_desc="等待邮箱输入框",
+            fail_reason="邮箱输入框未出现",
+            action=lambda: self._safe_wait_exists(email_input_node, 4, "邮箱输入框"),
+        ):
             # 记录错误日志，包含账号信息
             self.log.error("邮箱输入框未出现，无法继续输入", user_email=self.user_email)
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("邮箱输入框未出现")
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         # 点击邮箱输入框聚焦
         self._safe_click(email_input_node,"邮箱输入框-点击聚焦", sleep_interval=1)
 
         # 向当前焦点输入邮箱地址。
-        if not self._safe_input_on_focused(self.user_email, "邮箱输入框-当前焦点",True):
-            # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("邮箱输入失败")
+        if not _run_step_or_fail(
+            step_desc="输入邮箱",
+            fail_reason="邮箱输入失败",
+            action=lambda: self._safe_input_on_focused(self.user_email, "邮箱输入框-当前焦点", True),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
 
         self._safe_click(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), "提交邮箱下一页", sleep_interval=2)
@@ -1164,18 +1349,26 @@ class OpenSettingsTask:
         # 定位密码输入框
         facebook_input_password_node = poco(text=FACEBOOK_INPUT_PASSWORD[self.device_lang])
         # 等待密码输入框出现。
-        if not self._safe_wait_exists(facebook_input_password_node, 7, "密码输入框"):
+        if not _run_step_or_fail(
+            step_desc="等待密码输入框",
+            fail_reason="密码输入框未出现",
+            action=lambda: self._safe_wait_exists(facebook_input_password_node, 7, "密码输入框"),
+        ):
             # 记录错误日志，包含账号信息
             self.log.error("密码输入框未出现，无法继续输入", user_email=self.user_email)
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("密码输入框未出现")
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         # 点击密码输入框聚焦
         self._safe_click(facebook_input_password_node,"密码输入框-点击聚焦", sleep_interval=1)
         # 向当前焦点输入密码。
-        if not self._safe_input_on_focused(self.pwd, "密码输入框-当前焦点",True):
-            # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("密码输入失败")
+        if not _run_step_or_fail(
+            step_desc="输入 Facebook 密码",
+            fail_reason="密码输入失败",
+            action=lambda: self._safe_input_on_focused(self.pwd, "密码输入框-当前焦点", True),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         self._safe_click(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), "提交密码下一页", sleep_interval=2)
 
@@ -1191,9 +1384,13 @@ class OpenSettingsTask:
             # 确认最后信息
 
             access_node = poco(text=FACEBOOK_FINAL_CREATE_USER_BUTTON[self.device_lang])
-            if not self._safe_wait_exists(access_node, 5, "创建接受账号按钮"):
-                # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到创建接受账号按钮")
+            if not _run_step_or_fail(
+                step_desc="等待创建接受账号按钮",
+                fail_reason="未找到创建接受账号按钮",
+                action=lambda: self._safe_wait_exists(access_node, 5, "创建接受账号按钮"),
+            ):
+                # 步骤失败且重试后仍失败时，直接结束当前流程。
+                return False
 
             self._safe_click(access_node, "创建账号按钮", sleep_interval=5)
         else:
@@ -1251,9 +1448,13 @@ class OpenSettingsTask:
 
         # 验证码输入
         email_node = poco(text=FACEBOOK_EMAIL_CODE_INPUT[self.device_lang])
-        if not self._safe_wait_exists(email_node, 15, "验证码输入框"):
-            # 返回失败并记录具体错误原因。
-            return self._facebook_fail("未找到验证码输入框")
+        if not _run_step_or_fail(
+            step_desc="等待验证码输入框",
+            fail_reason="未找到验证码输入框",
+            action=lambda: self._safe_wait_exists(email_node, 15, "验证码输入框"),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
         self._safe_click(email_node, "验证码输入框-点击聚焦", sleep_interval=1)
 
@@ -1266,9 +1467,13 @@ class OpenSettingsTask:
             # 返回失败并记录具体错误原因。
             return self._facebook_fail("获取验证码失败")
 
-        if not self._safe_input_on_focused(cached_fb_code, "输入 fb code",False):
-            # 输入失败时返回失败并记录原因。
-            return self._facebook_fail("输入验证码失败")
+        if not _run_step_or_fail(
+            step_desc="输入 Facebook 验证码",
+            fail_reason="输入验证码失败",
+            action=lambda: self._safe_input_on_focused(cached_fb_code, "输入 fb code", False),
+        ):
+            # 步骤失败且重试后仍失败时，直接结束当前流程。
+            return False
 
 
 
