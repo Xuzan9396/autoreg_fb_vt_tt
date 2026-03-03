@@ -8,8 +8,10 @@ from typing import Any, Callable
 
 import flet as ft
 
+from autovt.gui.account_importer import AccountFileImporter, NAME_COUNTRY_OPTIONS
 from autovt.gui.helpers import (
     ACCOUNT_PAGE_SIZE,
+    VT_PWD_KEY,
     account_status_color,
     account_status_text,
     format_timestamp,
@@ -41,6 +43,8 @@ class AccountTab:
         self._total = 0
         self._total_pages = 1
         self._editing_user_id: int | None = None
+        # 创建账号批量导入器实例。
+        self._account_importer = AccountFileImporter(user_db=self.user_db, log=log)
 
         # ── UI 控件占位 ──
         self.summary_text: ft.Text | None = None
@@ -54,6 +58,8 @@ class AccountTab:
         self.page_text: ft.Text | None = None
         self.prev_button: ft.OutlinedButton | None = None
         self.next_button: ft.OutlinedButton | None = None
+        self.import_country_dropdown: ft.Dropdown | None = None
+        self.import_file_picker: ft.FilePicker | None = None
 
         # 表单控件占位
         self.email_account_input: ft.TextField | None = None
@@ -105,11 +111,30 @@ class AccountTab:
         self.page_text = ft.Text(value="第 1 / 1 页（共 0 条）", size=12, color=ft.Colors.BLUE_GREY_700)
         self.prev_button = ft.OutlinedButton("上一页", icon=ft.Icons.CHEVRON_LEFT, disabled=True, on_click=self._goto_prev_page)
         self.next_button = ft.OutlinedButton("下一页", icon=ft.Icons.CHEVRON_RIGHT, disabled=True, on_click=self._goto_next_page)
+        # 创建姓名国家下拉框，导入时用于 Faker 生成姓名。
+        self.import_country_dropdown = ft.Dropdown(
+            # 使用占位提示，避免浮动 label 与描边边框重叠导致显示异常。
+            hint_text="选择姓名国家",
+            # 默认使用法国姓名。
+            value="fr_FR",
+            # 控件宽度。
+            width=180,
+            # 选项列表（法国、英国等）。
+            options=[ft.dropdown.Option(locale, label) for label, locale in NAME_COUNTRY_OPTIONS],
+        )
+        # 创建文件选择器服务，供“一键导入文件”使用。
+        self.import_file_picker = ft.FilePicker()
+        # 避免重复添加到页面 services。
+        if self.import_file_picker not in self.page.services:
+            # 把文件选择器挂到页面级 services。
+            self.page.services.append(self.import_file_picker)
 
         actions = ft.Row(
             controls=[
                 ft.FilledButton("新增账号", icon=ft.Icons.ADD, on_click=self._open_create_dialog),
                 ft.FilledButton("刷新账号", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
+                self.import_country_dropdown,
+                ft.OutlinedButton("一键导入文件", icon=ft.Icons.UPLOAD_FILE, on_click=self._pick_import_file),
             ],
             alignment=ft.MainAxisAlignment.START,
             spacing=8,
@@ -354,6 +379,103 @@ class AccountTab:
     # ═══════════════════════════════════════════════════════════════════
     # 表单弹窗 (新增 / 编辑)
     # ═══════════════════════════════════════════════════════════════════
+
+    async def _pick_import_file(self, _e: ft.ControlEvent | None = None) -> None:
+        """打开文件选择器，选择要导入的文本文件。"""
+        # 文件选择器未初始化时直接提示。
+        if not self.import_file_picker:
+            self._show_snack("文件选择器未初始化，请重试。")
+            return
+        # 打开系统文件选择窗口（不限制后缀，只要是文本内容即可）。
+        try:
+            # pick_files 在当前 Flet 版本是协程方法，需要 await。
+            picked_files = await self.import_file_picker.pick_files(
+                allow_multiple=False,
+                dialog_title="选择账号导入文件（任意后缀，内容需为文本）",
+                file_type=ft.FilePickerFileType.ANY,
+            )
+        # 文件选择器调用失败时提示错误。
+        except Exception as exc:
+            # 记录异常详情。
+            log.exception("打开文件选择器失败", error=str(exc))
+            # 给用户提示失败原因。
+            self._show_snack(f"打开文件选择器失败: {exc}")
+            return
+        # 处理文件选择结果并执行导入。
+        self._handle_import_file_result(picked_files)
+
+    def _handle_import_file_result(self, picked_files: list[Any] | None) -> None:
+        """处理文件选择结果并执行批量导入。"""
+        # 用户取消选择时直接返回。
+        if not picked_files:
+            return
+        # 仅取第一份文件路径。
+        selected_path = str(getattr(picked_files[0], "path", "") or "").strip()
+        # 兼容极端场景：桌面端路径为空。
+        if selected_path == "":
+            self._show_snack("读取文件路径失败，请重新选择文件。")
+            return
+        # 读取全局 vt_pwd 配置。
+        vt_pwd_row = self.user_db.get_config(VT_PWD_KEY)
+        # 提取全局密码值。
+        vt_pwd_value = str(vt_pwd_row.get("val", "") if vt_pwd_row else "").strip()
+        # 未设置全局密码时禁止导入。
+        if vt_pwd_value == "":
+            self._show_snack("请先到“全局设置”填写 vt_pwd，再执行批量导入。")
+            return
+        # 读取姓名国家 locale；未选择时回退法国。
+        selected_locale = str(self.import_country_dropdown.value if self.import_country_dropdown else "fr_FR").strip() or "fr_FR"
+        # 记录导入启动日志。
+        log.info("开始批量导入账号", file_path=selected_path, name_locale=selected_locale)
+        try:
+            # 执行“先校验后写库”的导入逻辑。
+            result = self._account_importer.import_from_file(
+                file_path=selected_path,
+                vt_pwd=vt_pwd_value,
+                name_locale=selected_locale,
+            )
+        # 捕获导入主流程异常并提示。
+        except Exception as exc:
+            log.exception("批量导入执行异常", file_path=selected_path, name_locale=selected_locale, error=str(exc))
+            self._show_snack(f"批量导入失败: {exc}")
+            return
+        # 命中格式错误时直接提示，不执行刷新。
+        if result.has_validation_error():
+            # 取前 3 条错误做提示摘要。
+            preview = "；".join(result.validation_errors[:3])
+            # 给出“未写库”明确提示。
+            self._show_snack(f"导入失败：发现 {len(result.validation_errors)} 条格式错误，未写入 t_user。{preview}")
+            return
+        # 构造成功统计文案。
+        success_msg = (
+            f"导入完成：总行 {result.total_non_empty_lines}，"
+            f"有效 {result.valid_line_count}，"
+            f"新增 {result.inserted_count}，"
+            f"已存在跳过 {result.skipped_existing_count}，"
+            f"文件内重复跳过 {result.skipped_duplicate_in_file_count}"
+        )
+        # 写库阶段仍可能存在单条异常，单独补充提示。
+        if len(result.insert_errors) > 0:
+            # 取前 2 条错误做摘要。
+            insert_error_preview = "；".join(result.insert_errors[:2])
+            # 拼接错误统计文案。
+            success_msg = f"{success_msg}，写库失败 {len(result.insert_errors)}。{insert_error_preview}"
+        # 输出导入结果日志。
+        log.info(
+            "批量导入完成",
+            file_path=selected_path,
+            total_non_empty_lines=result.total_non_empty_lines,
+            valid_line_count=result.valid_line_count,
+            inserted_count=result.inserted_count,
+            skipped_existing_count=result.skipped_existing_count,
+            skipped_duplicate_in_file_count=result.skipped_duplicate_in_file_count,
+            insert_error_count=len(result.insert_errors),
+        )
+        # 刷新账号列表展示。
+        self._page_index = 1
+        self.refresh(source="import_file", show_toast=False)
+        # 给出导入完成提示。
+        self._show_snack(success_msg)
 
     def _open_create_dialog(self, _e: ft.ControlEvent | None = None) -> None:
         self._open_form_dialog(dialog_title="新增账号", row=None)

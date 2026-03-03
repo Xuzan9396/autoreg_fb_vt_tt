@@ -36,6 +36,12 @@ STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
 STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号重试次数: 0=不重试，1=重试一次（范围 0 到 5）"
 # 定义状态重试默认次数为 0（表示不重试）。
 STATUS_23_RETRY_MAX_DEFAULT = "0"
+# 定义全局 vinted 密码配置 key 常量。
+VT_PWD_KEY = "vt_pwd"
+# 定义全局 vinted 密码配置描述文案常量。
+VT_PWD_DESC = "Vinted 全局密码配置（为空时表示不启用全局密码）"
+# 定义全局 vinted 密码默认值为空字符串（表示不启用全局密码）。
+VT_PWD_DEFAULT = ""
 # 定义状态重试次数最小值（0=不重试）。
 STATUS_23_RETRY_MIN = 0
 # 定义状态重试次数最大值（5=最多重试 5 次）。
@@ -48,6 +54,10 @@ REGISTER_STATUS_MAX = 2
 ACCOUNT_STATUS_MIN = 0
 # 定义账号状态最大值（3=账号问题）。
 ACCOUNT_STATUS_MAX = 3
+# 定义 SQLite 连接超时时间（秒），用于多进程并发写时的锁等待。
+SQLITE_CONNECT_TIMEOUT_SEC = 30.0
+# 定义 SQLite busy_timeout（毫秒），用于降低 database is locked 报错概率。
+SQLITE_BUSY_TIMEOUT_MS = 30000
 
 
 # 定义当前时间戳方法，返回秒级 int 时间戳。
@@ -207,13 +217,15 @@ class UserDB:
         # 再次确保父目录存在，防止路径目录缺失。
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # 创建 SQLite 连接并绑定到当前数据库文件。
-        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn = sqlite3.connect(str(self.db_path), timeout=SQLITE_CONNECT_TIMEOUT_SEC)
         # 设置行工厂为 Row，便于按列名读取数据。
         self._conn.row_factory = sqlite3.Row
-        # 设置锁等待超时 5 秒，降低多进程并发写时的锁冲突报错概率。
-        self._conn.execute("PRAGMA busy_timeout=5000;")
+        # 设置锁等待超时为 30 秒，降低多进程并发写时的锁冲突报错概率。
+        self._conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
         # 开启 WAL 模式，提升并发读写稳定性。
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        # 设置 WAL 自动 checkpoint，避免 WAL 文件无限增大。
+        self._conn.execute("PRAGMA wal_autocheckpoint=1000;")
         # 同步级别用 NORMAL，兼顾性能与可靠性。
         self._conn.execute("PRAGMA synchronous=NORMAL;")
         # 打开外键开关，保持行为一致性（即使当前表未用外键）。
@@ -356,6 +368,18 @@ class UserDB:
             (STATUS_23_RETRY_MAX_KEY, retry_default_val, STATUS_23_RETRY_MAX_DESC, now_ts()),
         # SQL 执行结束。
         )
+        # 计算并校验全局 vinted 密码默认值。
+        vt_pwd_default_val = self._normalize_config_value(VT_PWD_KEY, VT_PWD_DEFAULT)
+        # 插入全局 vinted 密码默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (VT_PWD_KEY, vt_pwd_default_val, VT_PWD_DESC, now_ts()),
+        # SQL 执行结束。
+        )
 
     # 定义配置值标准化方法，并做 key 级别校验。
     def _normalize_config_value(self, key: str, val: str) -> str:
@@ -401,6 +425,14 @@ class UserDB:
                 raise ValueError("status_23_retry_max_num 超出范围，必须在 0 到 5 之间")
             # 返回标准化后的整数文本。
             return str(retry_value)
+        # 针对全局 vinted 密码配置做长度保护（允许空值）。
+        if key == VT_PWD_KEY:
+            # 密码过长时直接报错，避免异常超长数据写入数据库。
+            if len(raw_value) > 256:
+                # 抛出明确错误提示。
+                raise ValueError("vt_pwd 长度不能超过 256 个字符")
+            # 返回清理后的密码文本（可为空）。
+            return raw_value
         # 其他 key 当前不做额外规则，直接返回清理后文本。
         return raw_value
 
@@ -1363,6 +1395,10 @@ class UserDB:
             elif key_value == STATUS_23_RETRY_MAX_KEY:
                 # 采用默认描述文案。
                 desc_value = STATUS_23_RETRY_MAX_DESC
+            # 全局 vinted 密码配置使用固定默认描述。
+            elif key_value == VT_PWD_KEY:
+                # 采用默认描述文案。
+                desc_value = VT_PWD_DESC
 
         # 生成本次写入更新时间戳。
         update_time = now_ts()

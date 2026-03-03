@@ -11,6 +11,8 @@ from autovt.gui.helpers import (
     MOJIWANG_RUN_NUM_KEY,
     STATUS_23_RETRY_MAX_DESC,
     STATUS_23_RETRY_MAX_KEY,
+    VT_PWD_DESC,
+    VT_PWD_KEY,
     format_timestamp,
 )
 from autovt.logs import get_logger
@@ -34,8 +36,10 @@ class SettingsTab:
 
         self.mojiwang_value_input: ft.TextField | None = None
         self.status_23_retry_value_input: ft.TextField | None = None
+        self.vt_pwd_value_input: ft.TextField | None = None
         self.mojiwang_desc_text: ft.Text | None = None
         self.status_23_retry_desc_text: ft.Text | None = None
+        self.vt_pwd_desc_text: ft.Text | None = None
         self.config_last_refresh_text: ft.Text | None = None
 
     def build(self) -> ft.Control:
@@ -58,8 +62,21 @@ class SettingsTab:
             input_filter=ft.InputFilter(regex_string=r"[0-5]", allow=True),
             on_submit=self.save_config,
         )
+        # 创建全局 vinted 密码输入框。
+        self.vt_pwd_value_input = ft.TextField(
+            # 设置输入框标签为配置 key。
+            label=VT_PWD_KEY,
+            # 设置输入提示文案。
+            hint_text="请输入 vinted 全局密码（可为空）",
+            # 统一输入框宽度。
+            width=320,
+            # 回车时触发保存。
+            on_submit=self.save_config,
+        )
         self.mojiwang_desc_text = ft.Text(value=MOJIWANG_RUN_NUM_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
         self.status_23_retry_desc_text = ft.Text(value=STATUS_23_RETRY_MAX_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
+        # 创建全局 vinted 密码描述文本。
+        self.vt_pwd_desc_text = ft.Text(value=VT_PWD_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
         self.config_last_refresh_text = ft.Text(value="最近刷新: -", size=12, color=ft.Colors.BLUE_GREY_600)
 
         actions = ft.Row(
@@ -85,6 +102,8 @@ class SettingsTab:
                             self.mojiwang_value_input,
                             self.status_23_retry_desc_text,
                             self.status_23_retry_value_input,
+                            self.vt_pwd_desc_text,
+                            self.vt_pwd_value_input,
                             actions,
                             self.config_last_refresh_text,
                         ],
@@ -101,34 +120,48 @@ class SettingsTab:
         if (
             not self.mojiwang_value_input
             or not self.status_23_retry_value_input
+            or not self.vt_pwd_value_input
             or not self.mojiwang_desc_text
             or not self.status_23_retry_desc_text
+            or not self.vt_pwd_desc_text
             or not self.config_last_refresh_text
         ):
             return
         try:
-            # 先触发默认配置补齐，确保两个 key 都存在。
+            # 先触发默认配置补齐，确保三个 key 都存在。
             self.user_db.get_config_map()
             # 读取抹机王轮次配置。
             mojiwang_row = self.user_db.get_config(MOJIWANG_RUN_NUM_KEY)
             # 读取 status=2/3 最大重试次数配置。
             retry_row = self.user_db.get_config(STATUS_23_RETRY_MAX_KEY)
+            # 读取全局 vinted 密码配置。
+            vt_pwd_row = self.user_db.get_config(VT_PWD_KEY)
             if mojiwang_row is None:
                 raise RuntimeError(f"读取配置失败：{MOJIWANG_RUN_NUM_KEY} 不存在")
             if retry_row is None:
                 raise RuntimeError(f"读取配置失败：{STATUS_23_RETRY_MAX_KEY} 不存在")
+            if vt_pwd_row is None:
+                raise RuntimeError(f"读取配置失败：{VT_PWD_KEY} 不存在")
 
             # 回填抹机王轮次值。
             self.mojiwang_value_input.value = str(mojiwang_row.get("val", "3"))
             # 回填 status=2/3 最大重试次数值。
             self.status_23_retry_value_input.value = str(retry_row.get("val", "0"))
+            # 回填全局 vinted 密码值。
+            self.vt_pwd_value_input.value = str(vt_pwd_row.get("val", ""))
             # 回填抹机王配置描述文案。
             self.mojiwang_desc_text.value = str(mojiwang_row.get("desc", MOJIWANG_RUN_NUM_DESC))
             # 回填重试配置描述文案。
             self.status_23_retry_desc_text.value = str(retry_row.get("desc", STATUS_23_RETRY_MAX_DESC))
+            # 回填全局 vinted 密码配置描述文案。
+            self.vt_pwd_desc_text.value = str(vt_pwd_row.get("desc", VT_PWD_DESC))
 
-            # 取两个配置中较新的更新时间展示在页面。
-            latest_update_at = max(int(mojiwang_row.get("update_at", 0)), int(retry_row.get("update_at", 0)))
+            # 取三个配置中较新的更新时间展示在页面。
+            latest_update_at = max(
+                int(mojiwang_row.get("update_at", 0)),
+                int(retry_row.get("update_at", 0)),
+                int(vt_pwd_row.get("update_at", 0)),
+            )
             self.config_last_refresh_text.value = f"最近刷新: {format_timestamp(latest_update_at)}"
 
             if source == "manual" and show_toast:
@@ -139,13 +172,15 @@ class SettingsTab:
             self._show_snack(f"刷新设置失败: {exc}")
 
     def save_config(self, _e: ft.ControlEvent | None = None) -> None:
-        """保存 mojiwang_run_num 与 status_23_retry_max_num 配置值。"""
-        if not self.mojiwang_value_input or not self.status_23_retry_value_input:
+        """保存 mojiwang_run_num、status_23_retry_max_num 与 vt_pwd 配置值。"""
+        if not self.mojiwang_value_input or not self.status_23_retry_value_input or not self.vt_pwd_value_input:
             return
         # 读取抹机王轮次输入值。
         mojiwang_raw_value = str(self.mojiwang_value_input.value or "").strip()
         # 读取 status=2/3 最大重试次数输入值。
         retry_raw_value = str(self.status_23_retry_value_input.value or "").strip()
+        # 读取全局 vinted 密码输入值。
+        vt_pwd_raw_value = str(self.vt_pwd_value_input.value or "")
         if mojiwang_raw_value == "":
             self._show_snack("mojiwang_run_num 不能为空，请输入 1 到 100 的整数。")
             return
@@ -157,6 +192,8 @@ class SettingsTab:
             self.user_db.set_config(key=MOJIWANG_RUN_NUM_KEY, val=mojiwang_raw_value, desc=MOJIWANG_RUN_NUM_DESC)
             # 保存 status=2/3 最大重试次数配置。
             self.user_db.set_config(key=STATUS_23_RETRY_MAX_KEY, val=retry_raw_value, desc=STATUS_23_RETRY_MAX_DESC)
+            # 保存全局 vinted 密码配置。
+            self.user_db.set_config(key=VT_PWD_KEY, val=vt_pwd_raw_value, desc=VT_PWD_DESC)
             self.refresh(source="save", show_toast=False)
             self._show_snack("配置保存成功。")
         except Exception as exc:
@@ -166,5 +203,7 @@ class SettingsTab:
                 mojiwang_raw_value=mojiwang_raw_value,
                 retry_key=STATUS_23_RETRY_MAX_KEY,
                 retry_raw_value=retry_raw_value,
+                vt_pwd_key=VT_PWD_KEY,
+                vt_pwd_length=len(vt_pwd_raw_value),
             )
             self._show_snack(f"保存配置失败: {exc}")

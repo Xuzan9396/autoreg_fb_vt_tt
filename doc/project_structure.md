@@ -50,6 +50,7 @@ autovt/
 
 - `main.py`：主入口（默认 GUI），支持 `--mode cli` 回退命令行模式。
 - `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）。
+- `autovt/gui/account_importer.py`：账号批量导入逻辑模块（文本文件读取、全量格式校验、国家化 Faker 姓名生成、跳过已存在邮箱、批量写入 `t_user`）。
 - `autovt/auth/login_service.py`：登录服务模块；对齐 Go 版登录协议（AES-GCM + `/bit_login`），并提供本地账号密码缓存（下次启动自动回填）。
 - `autovt/gui/__init__.py`：GUI 包导出入口（`run_gui`）。
 - `autovt/cli.py`：命令行交互层（用于 `--mode cli` 回退场景）。
@@ -62,10 +63,10 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；任务结束会主动关闭任务内 `UserDB` 连接，避免长期运行时连接堆积。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
-- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）。
+- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
 
 其中 ADB 相关关键项：
 - `ADB_SERVER_ADDR`：ADB Server 地址（如 `127.0.0.1:5037`）。
@@ -173,10 +174,12 @@ autovt/
 1. 跨平台解析用户配置目录（Windows/macOS/Linux）。
 2. 默认数据库文件：`user.db`（应用目录 `vinted_android` 下）。
 3. 每次 `connect()` 会设置 PRAGMA：
-   - `busy_timeout=5000`
+   - `busy_timeout=30000`
    - `journal_mode=WAL`
+   - `wal_autocheckpoint=1000`
    - `synchronous=NORMAL`
    - `foreign_keys=ON`
+4. 连接层也设置了 `sqlite connect timeout=30s`，并发写高峰时更不容易出现瞬时锁失败。
 
 ### 2) 建表与迁移
 
@@ -188,6 +191,7 @@ autovt/
 3. 自动补默认配置：
    - `t_config.mojiwang_run_num=3`（缺失才写入）。
    - `t_config.status_23_retry_max_num=0`（缺失才写入，表示默认不重试）。
+   - `t_config.vt_pwd=''`（缺失才写入，空值表示不启用全局密码兜底）。
 
 ### 3) 索引
 
@@ -242,18 +246,22 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 账号 Tab：新增/编辑弹窗支持 `一键识别并填充`
 - 一键识别格式（固定 4 段）：`email----email_pwd----client_id----email_access_key`（第三段自动填充 `client_id`）
 - 一键识别授权码清洗：自动去除密钥中的换行和空白，兼容长密钥粘贴换行场景
+- 账号 Tab：支持“一键导入文件”（任意后缀文本文件），按 `email----email_pwd----client_id----email_access_key` 全量校验后再批量写库
+- 账号 Tab：导入可选姓名国家（法国/英国/美国/德国/西班牙/意大利），并使用 Faker 自动生成 `first_name/last_name`
+- 账号 Tab：导入时 `pwd` 统一取全局 `vt_pwd`；未配置 `vt_pwd` 时会提示先设置
 - 账号 Tab：`email_access_key` 列表展示时只显示前 10 位，其余 `...`
 - 账号 Tab 状态文案：
 - `fb_status/vinted_status/titok_status`：`0=未注册`、`1=成功`、`2=失败`
 - `status`：`0=未使用`、`1=正在使用`、`2=已经使用`、`3=账号问题`
-- 设置 Tab：读取 `t_config` 并支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`
+- 设置 Tab：读取 `t_config` 并支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`、`vt_pwd`
 - `mojiwang_run_num` 规则：仅允许 `1~100` 整数
 - `status_23_retry_max_num` 规则：仅允许 `0~5` 整数（`0`=不重试，`1`=重试 1 次，`3`=重试 3 次，最大 `5` 次）
 - 设置 Tab 的 `status_23_retry_max_num` 输入框在 Flet UI 层已加输入限制：仅允许输入 `0~5` 单个数字
+- `vt_pwd` 规则：允许空值；非空时长度不超过 `256` 字符
 - 登录页：默认走加密 API 登录；当环境变量 `GITXUZAN_LOGIN=1` 时跳过 API 登录校验（任意账号密码可登录）
 - 登录页：登录成功后会写入本地缓存，重新打开软件自动回填上次账号密码
 - 登录页：`401 Unauthorized` 按“账号或密码错误”处理，只打印告警日志，不输出异常堆栈
-- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`（缺失时自动补齐）
+- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`、`vt_pwd=''`（缺失时自动补齐）
 - GUI 已去掉：`once/run_once` 单轮手动触发入口
 
 ## 多设备账号分配规则（当前版）
@@ -264,6 +272,8 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 当当前账号仍为 `status=1` 时，worker 会持续复用同一账号执行，不会切换新账号
 - 当当前账号变为 `status=2/3` 时，worker 会按 `status_23_retry_max_num` 对同一账号执行对应次数的“额外重试”（例如配置 `3` 就额外重试 `3` 次）；超过上限后才释放并切换新账号
 - 若无可用账号（无 `status=0`），worker 进入 `waiting` 状态并睡眠等待，不执行自动化任务
+- waiting 状态改为低频轮询：`WORKER_WAITING_POLL_INTERVAL_SEC=8.0`（默认），避免子进程高频空转和频繁打 SQLite
+- worker 遇到 SQLite 锁冲突（`database is locked/busy`）会降级为 waiting 并延迟重试，不会直接崩溃
 - 当后续有新可用账号写入后，worker 会自动继续领取并执行任务
 - 停止设备时释放规则：
 - 若账号当前 `status=1`，停止后回收为 `status=0`，并清空 `device`

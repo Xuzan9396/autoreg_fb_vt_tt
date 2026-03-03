@@ -37,7 +37,7 @@ BIT_LOGIN_KEY = b"xUI7TjReIilQQKhqccFEPw6YsJA4PYeV"
 # 定义与 Go 端一致的生产环境登录接口地址。
 DEFAULT_PROD_API = "http://45.77.62.32:8989/bit_login"
 # 定义与 Go 端一致的开发环境登录接口地址。
-DEFAULT_DEV_API = "http://127.0.0.1:8989/bit_login"
+# DEFAULT_DEV_API = "http://127.0.0.1:8989/bit_login"
 # 定义本地登录缓存文件名。
 LOGIN_CACHE_FILENAME = "login_cache.json"
 
@@ -86,27 +86,19 @@ class LoginService:
         # 显式指定 dev 时强制走开发地址。
         if login_env in {"dev", "development"}:
             # 返回开发环境 API。
-            return DEFAULT_DEV_API
+            return DEFAULT_PROD_API
         # 显式指定 prod 时强制走生产地址。
         if login_env in {"prod", "production"}:
             # 返回生产环境 API。
             return DEFAULT_PROD_API
-        # 读取 WAILS_ENV 环境变量。
-        wails_env = str(os.getenv("WAILS_ENV", "")).strip().lower()
-        # 当值为 dev 时走本地开发地址。
-        if wails_env in {"dev", "development"}:
-            # 返回开发环境 API。
-            return DEFAULT_DEV_API
-        # 当值为 prod 时走生产地址。
-        if wails_env in {"prod", "production"}:
-            # 返回生产环境 API。
-            return DEFAULT_PROD_API
+
+
         # 判断当前是否为打包运行（PyInstaller/Frozen）形态。
         is_frozen_runtime = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
         # 源码运行（含 uv run）默认走开发环境地址，方便本地调试。
         if not is_frozen_runtime:
             # 返回开发环境 API。
-            return DEFAULT_DEV_API
+            return DEFAULT_PROD_API
         # 默认走生产环境 API。
         return DEFAULT_PROD_API
 

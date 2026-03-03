@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# 导入 sqlite3，用于识别数据库锁冲突异常并做降级等待。
+import sqlite3
 import multiprocessing as mp
 import queue
 import time
@@ -13,7 +15,9 @@ from autovt.settings import (
     WORKER_INIT_RETRY_DELAY_SEC,
     WORKER_MAX_CONSECUTIVE_UNKNOWN_ERRORS,
     WORKER_MAX_INIT_RETRIES,
+    WORKER_PAUSED_POLL_INTERVAL_SEC,
     WORKER_RECOVER_RETRY_DELAY_SEC,
+    WORKER_WAITING_POLL_INTERVAL_SEC,
 )
 from autovt.tasks.task_context import TaskContext
 from autovt.userdb import (
@@ -21,6 +25,8 @@ from autovt.userdb import (
     STATUS_23_RETRY_MAX_DEFAULT,
     STATUS_23_RETRY_MAX_KEY,
     STATUS_23_RETRY_MIN,
+    VT_PWD_DEFAULT,
+    VT_PWD_KEY,
     UserDB,
 )
 
@@ -189,6 +195,17 @@ def _is_fatal_task_context_error(exc: Exception) -> bool:
         return False
     detail = str(exc)
     return "TaskContext" in detail and "缺少必填字段" in detail
+
+
+def _is_sqlite_locked_error(exc: Exception) -> bool:
+    # 仅识别 sqlite OperationalError，避免误判其他异常类型。
+    if not isinstance(exc, sqlite3.OperationalError):
+        # 非 sqlite 锁异常时返回 False。
+        return False
+    # 提取异常文本并转小写做关键字匹配。
+    detail = str(exc).strip().lower()
+    # 命中 locked/busy 关键字时判定为并发锁冲突。
+    return "database is locked" in detail or "database is busy" in detail or "locked" in detail
 
 
 def _load_airtest_error_types() -> dict[str, Any]:
@@ -549,6 +566,7 @@ def worker_main(
             config_map = {
                 "mojiwang_run_num": "3",
                 STATUS_23_RETRY_MAX_KEY: STATUS_23_RETRY_MAX_DEFAULT,
+                VT_PWD_KEY: VT_PWD_DEFAULT,
             # 回退默认配置，确保任务循环可继续运行。
             }
             log.exception("读取 t_config 失败，使用默认配置", error=str(exc), fallback_config=config_map)
@@ -680,7 +698,23 @@ def worker_main(
 
                 if command == "run_once":
                     # 手动执行前先准备账号和配置上下文。
-                    runtime_context = _prepare_task_context()
+                    try:
+                        # 准备账号和配置上下文。
+                        runtime_context = _prepare_task_context()
+                    # 捕获 sqlite 锁冲突，按等待态降级处理，不让 worker 崩溃。
+                    except Exception as exc:
+                        # 命中数据库锁冲突时走等待重试分支。
+                        if _is_sqlite_locked_error(exc):
+                            # 向主进程上报等待状态。
+                            _emit(event_queue, serial, "waiting", f"SQLite 锁冲突，等待重试: {exc}")
+                            # 记录告警日志便于排查。
+                            log.warning("手动 run_once 准备上下文遇到 SQLite 锁冲突", serial=serial, error=str(exc))
+                            # 低频等待一轮，降低锁竞争。
+                            _sleep_with_stop(stop_event, max(loop_interval_sec, WORKER_WAITING_POLL_INTERVAL_SEC))
+                            # 跳过本次命令处理，进入下一轮。
+                            continue
+                        # 非锁冲突异常继续抛出，走原有错误处理链路。
+                        raise
                     # 无可用账号时不执行任务。
                     if runtime_context is None:
                         continue
@@ -725,14 +759,32 @@ def worker_main(
                 break
 
             if paused:
-                _sleep_with_stop(stop_event, 0.2)
+                # 暂停态使用低频轮询，减少空转占用。
+                _sleep_with_stop(stop_event, WORKER_PAUSED_POLL_INTERVAL_SEC)
                 continue
 
             # 自动轮询执行前先准备账号和配置上下文。
-            runtime_context = _prepare_task_context()
+            try:
+                # 准备账号和配置上下文。
+                runtime_context = _prepare_task_context()
+            # 捕获 sqlite 锁冲突，按等待态降级处理，避免 worker 误判异常重启。
+            except Exception as exc:
+                # 命中数据库锁冲突时记录告警并进入低频等待。
+                if _is_sqlite_locked_error(exc):
+                    # 向主进程上报 waiting 状态，提示当前是 DB 锁竞争导致的等待。
+                    _emit(event_queue, serial, "waiting", f"SQLite 锁冲突，等待重试: {exc}")
+                    # 打印告警日志，便于排查并发写压力。
+                    log.warning("准备任务上下文遇到 SQLite 锁冲突，进入等待重试", serial=serial, error=str(exc))
+                    # 使用更低频的等待间隔，降低数据库争用。
+                    _sleep_with_stop(stop_event, max(loop_interval_sec, WORKER_WAITING_POLL_INTERVAL_SEC))
+                    # 结束本轮循环，进入下一轮重试。
+                    continue
+                # 非锁冲突异常继续抛出，走原有错误处理链路。
+                raise
             # 无可用账号时等待下一轮，不执行任务。
             if runtime_context is None:
-                _sleep_with_stop(stop_event, loop_interval_sec)
+                # 无账号时使用低频轮询，减少 DB 压力和空转。
+                _sleep_with_stop(stop_event, max(loop_interval_sec, WORKER_WAITING_POLL_INTERVAL_SEC))
                 continue
 
             email_account = str(runtime_context.user_info.get("email_account", "")).strip()

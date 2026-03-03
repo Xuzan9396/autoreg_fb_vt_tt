@@ -47,12 +47,16 @@ xcodebuild -version
 cd /Users/admin/go/src/autovt
 uv sync
 uvx --from flet==0.80.5 flet doctor
+POCO_ANDROID_DIR="$(uv run python -c 'from pathlib import Path; import poco; print((Path(poco.__file__).resolve().parent / "drivers" / "android").as_posix())')"
+AIRTEST_ANDROID_DIR="$(uv run python -c 'from pathlib import Path; import airtest; print((Path(airtest.__file__).resolve().parent / "core" / "android").as_posix())')"
 uv flet pack main.py \
   -n AutoVT \
   -i assets/icon.icns \
   --add-data "assets:assets" \
   --add-data "images:images" \
   --add-data "adb/mac:adb/mac" \
+  --add-data "${POCO_ANDROID_DIR}:poco/drivers/android" \
+  --add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android" \
   --yes -v
 ```
 
@@ -75,7 +79,9 @@ uv run --with flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes
 1. `--add-data "assets:assets"`：把运行时图标与静态资源一并打进包。
 2. `--add-data "images:images"`：把业务模板图资源一并打进包。
 3. `--add-data "adb/mac:adb/mac"`（mac）/`--add-data "adb/windows;adb/windows"`（windows）：仅打包当前平台 adb，减小体积并避免混入另一平台二进制。
-4. `--yes`：自动确认覆盖提示，适合 CI。
+4. `--add-data "${POCO_ANDROID_DIR}:poco/drivers/android"`：打包 Poco Android 整目录资源（包含 `pocoservice-debug.apk`，并覆盖后续新增资源）。
+5. `--add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android"`：打包 Airtest Android 整目录资源（包含 `Yosemite.apk`、`*.jar`、`stf_libs/*.so` 等依赖）。
+6. `--yes`：自动确认覆盖提示，适合 CI。
 
 产物一般在：
 
@@ -275,7 +281,7 @@ killall Dock
 6. `CocoaPods out of date`：通常是警告，不一定阻塞 macOS 构建；先把 `xcodebuild` 问题修好再处理。
 7. `flutter/dart not on PATH`：对 `flet pack` 一般不是阻塞项。
 8. Android `cmdline-tools` / `android-licenses`：做 macOS 桌面打包时可忽略。
-9. Windows 打包后若报 `pocoservice-debug.apk` 不存在：属于 `poco` 资源文件未被打入包。当前 workflow 已自动解析并注入 `poco/drivers/android/lib`，请使用最新 workflow 重新打 tag 构建。
+9. Windows 打包后若报 `pocoservice-debug.apk` 不存在：属于 `poco` 资源文件未被打入包。当前 workflow 已自动解析并注入 `poco/drivers/android` 整目录，并在构建前校验 apk 存在，请使用最新 workflow 重新打 tag 构建。
 
 ### 9.1 打包后出现 2 个窗口（一个空白，一个正常）
 
@@ -298,12 +304,16 @@ killall Dock
 验证建议：
 
 ```bash
+POCO_ANDROID_DIR="$(uv run python -c 'from pathlib import Path; import poco; print((Path(poco.__file__).resolve().parent / "drivers" / "android").as_posix())')"
+AIRTEST_ANDROID_DIR="$(uv run python -c 'from pathlib import Path; import airtest; print((Path(airtest.__file__).resolve().parent / "core" / "android").as_posix())')"
 uvx --from flet==0.80.5 flet pack main.py \
   -n AutoVT \
   -i assets/icon.icns \
   --add-data "assets:assets" \
   --add-data "images:images" \
   --add-data "adb/mac:adb/mac" \
+  --add-data "${POCO_ANDROID_DIR}:poco/drivers/android" \
+  --add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android" \
   --yes -v
 ```
 
@@ -403,6 +413,7 @@ git push origin v0.1.0
 3. 两个平台都会生成对应 `.sha256` 文件并上传为 Artifacts。
 4. `release` job 会汇总两个平台产物并附加到当前 tag 的 GitHub Release。
 5. `adb` 资源按平台拆分打包：macOS 仅打 `adb/mac`，Windows 仅打 `adb/windows`。
+6. Android 自动化依赖资源会一并打包：`poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`）。
 
 补充：
 

@@ -74,6 +74,14 @@ class OpenSettingsTask:
         self.user_last_name = str(self.user_info.get("last_name", "")).strip()
         # 缓存密码，供 Facebook 表单输入。
         self.pwd = str(self.user_info.get("pwd", "")).strip()
+        # 缓存全局 vt_pwd，供账号密码缺失时兜底使用。
+        self.vt_pwd = str(self.config_map.get("vt_pwd", "")).strip()
+        # 当账号 pwd 为空且配置了全局 vt_pwd 时，自动使用全局密码兜底。
+        if self.pwd == "" and self.vt_pwd != "":
+            # 使用全局 vt_pwd 作为当前任务密码。
+            self.pwd = self.vt_pwd
+            # 记录兜底日志，便于排查密码来源。
+            self.log.warning("账号 pwd 为空，已使用全局 vt_pwd 兜底", user_email=self.user_email)
         # 保存需要先清理数据的业务应用包名。
         self.vinted_package = "fr.vinted"
         # 保存插件应用包名。
@@ -338,8 +346,90 @@ class OpenSettingsTask:
                 self._handle_safe_action_exception("input_event", desc, exc)
                 # 返回 False，避免继续执行后续输入动作。
                 return False
-            # 记录输入失败原因。
-            self.log.error("输入事件失败，按跳过处理", target=desc, value=value, error=str(exc))
+            # 记录 text 输入失败原因，并进入 adb shell 输入兜底。
+            self.log.error("输入事件失败，尝试 adb shell 输入", target=desc, value=value, error=str(exc))
+            # 尝试使用 adb shell 对当前焦点输入文本。
+            if self._safe_input_by_adb_shell(value=value, desc=desc, enter=False):
+                # adb 输入成功则返回 True。
+                return True
+            # adb 兜底也失败时返回 False。
+            return False
+
+    # 定义“把文本转换为 adb input text 安全参数”的方法。
+    def _build_adb_input_text_arg(self, value: str) -> str:
+        # 先把入参标准化为字符串，避免 None 引发异常。
+        raw_value = str(value or "")
+        # 准备字符片段列表，后续逐字符拼接安全文本。
+        pieces: list[str] = []
+        # 逐个字符进行转换。
+        for char in raw_value:
+            # 空格转换为 %s，兼容 adb input text 语法。
+            if char == " ":
+                pieces.append("%s")
+                continue
+            # 常见 shell 特殊字符前补反斜杠，避免命令被解释。
+            if char in {'\\', '"', "'", "&", "|", "<", ">", ";", "(", ")", "$", "`", "!", "*", "?", "[", "]", "{", "}", "#"}:
+                pieces.append(f"\\{char}")
+                continue
+            # 普通字符按原样保留。
+            pieces.append(char)
+        # 返回转换后的安全参数字符串。
+        return "".join(pieces)
+
+    # 定义“使用 adb shell input text 输入当前焦点文本”的方法。
+    def _safe_input_by_adb_shell(self, value: str, desc: str, enter: bool = False) -> bool:
+        # 标准化输入文本，避免 None 透传到 adb。
+        safe_value = str(value or "")
+        # 空值输入没有业务意义，直接返回失败。
+        if safe_value == "":
+            # 记录空值失败原因，便于调用方定位。
+            self.log.error("ADB Shell 输入失败：值为空", target=desc)
+            # 返回 False 表示输入失败。
+            return False
+        # 把输入值转换成 adb input text 可接受格式。
+        adb_text_arg = self._build_adb_input_text_arg(safe_value)
+        # 转换后为空时直接返回失败。
+        if adb_text_arg == "":
+            # 记录转换失败日志。
+            self.log.error("ADB Shell 输入失败：参数为空", target=desc, value=safe_value)
+            # 返回 False 表示输入失败。
+            return False
+        # 延迟导入 device，避免主流程初始化阶段提前绑定 airtest。
+        try:
+            # 导入当前设备对象获取方法。
+            from airtest.core.api import device
+        # 导入失败时记录日志并返回失败。
+        except Exception as exc:
+            # 记录导入异常。
+            self.log.error("ADB Shell 输入失败：导入 device 失败", target=desc, value=safe_value, error=str(exc))
+            # 返回 False，避免异常扩散。
+            return False
+        # 尝试执行 adb shell 输入命令。
+        try:
+            # 获取当前 Airtest 绑定的设备对象。
+            current_device = device()
+            # 读取当前设备的 adb 客户端。
+            adb_client = current_device.adb
+            # 使用 adb input text 向当前焦点输入文本。
+            adb_client.shell(["input", "text", adb_text_arg])
+            # 当调用方要求回车时，补发 ENTER 键。
+            if enter:
+                # KEYCODE_ENTER 对应值是 66。
+                adb_client.shell(["input", "keyevent", "66"])
+            # 记录 adb 输入成功日志。
+            self.log.info("焦点输入成功", target=desc, value=safe_value, mode="adb_input_text")
+            # 返回 True 表示输入成功。
+            return True
+        # adb 输入异常时统一兜底。
+        except Exception as exc:
+            # 连接类异常走统一恢复流程。
+            if self._is_poco_disconnect_error(exc):
+                # 统一记录并尝试恢复连接。
+                self._handle_safe_action_exception("focus_adb_input", desc, exc)
+                # 返回 False，避免继续执行。
+                return False
+            # 记录 adb 输入失败原因。
+            self.log.error("ADB Shell 输入失败，按跳过处理", target=desc, value=safe_value, error=str(exc))
             # 返回 False 表示输入失败。
             return False
 
@@ -361,8 +451,14 @@ class OpenSettingsTask:
                 self._handle_safe_action_exception("focus_text_input", desc, exc)
                 # 返回 False，避免继续执行粘贴动作。
                 return False
-            # 记录 text 失败原因。
-            self.log.error("text 输入失败，尝试剪贴板粘贴", target=desc, value=value, error=str(exc))
+            # 记录 text 失败原因，并进入 adb shell 输入兜底。
+            self.log.error("text 输入失败，尝试 adb shell 输入", target=desc, value=value, error=str(exc))
+        # 先尝试 adb shell 输入作为第一层兜底。
+        if self._safe_input_by_adb_shell(value=value, desc=desc, enter=enter):
+            # adb 输入成功时直接返回。
+            return True
+        # adb 失败后再尝试剪贴板粘贴。
+        self.log.warning("adb shell 输入失败，尝试剪贴板粘贴", target=desc, value=value)
         # 尝试剪贴板粘贴作为兜底方案。
         try:
             # 先把要输入的值写入系统剪贴板。
@@ -1361,6 +1457,14 @@ class OpenSettingsTask:
                     final_reason = "Facebook 注册失败：流程未完成，未命中成功条件"
                 # 回写失败状态和详细错误原因。
                 self._update_fb_result_to_db(success=False, reason=final_reason)
+            # 关闭任务内数据库连接，避免每轮 run_once 产生连接堆积。
+            try:
+                # 主动关闭当前任务实例持有的 UserDB 连接。
+                self.user_db.close()
+            # 关闭失败只记日志，不影响主流程。
+            except Exception as exc:
+                # 记录关闭异常，便于后续排查。
+                self.log.exception("关闭任务内 user_db 失败", error=str(exc))
             # 任务尾部等待 30 秒，给外部观察或下轮衔接留时间。
             sleep(30)
 

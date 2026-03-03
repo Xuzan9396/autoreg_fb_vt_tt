@@ -67,6 +67,10 @@ TOUCH_METHOD = "MAXTOUCH"
 
 # 多进程任务循环间隔（秒）
 WORKER_LOOP_INTERVAL_SEC = 2.0
+# worker 在“无可用账号/等待任务”状态下的低频轮询间隔（秒）。
+WORKER_WAITING_POLL_INTERVAL_SEC = 8.0
+# worker 在“暂停状态”下的低频轮询间隔（秒）。
+WORKER_PAUSED_POLL_INTERVAL_SEC = 0.5
 # 单设备优雅停止等待超时（秒）：超时后进入强制终止。
 WORKER_STOP_GRACE_TIMEOUT_SEC = 2.0
 # 强制终止后再次等待进程退出的超时（秒）。
