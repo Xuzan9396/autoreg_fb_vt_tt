@@ -738,8 +738,8 @@ class OpenSettingsTask:
             sleep(1)
             # 定位顶部分组容器的直接子项。
             parent = poco("moe.nb4a:id/group_tab").child("android.widget.LinearLayout")
-            # 先判断父节点是否存在，避免后面直接报错。
-            if not parent.exists():
+            # 先安全等待父节点出现，避免直接 exists/click 触发连接异常中断。
+            if not self._safe_wait_exists(parent, 3, "Nekobox 模式选择父节点"):
                 # 记录错误日志。
                 self.log.error("未找到 Nekobox 模式选择父节点，无法继续", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
@@ -753,11 +753,15 @@ class OpenSettingsTask:
                 # 本轮提前结束，finally 仍会执行收尾。
                 return
             # 点击第二个分组（索引从 0 开始，1 表示第二个）。
-            tab_children[1].click(focus=None, sleep_interval=1)
+            if not self._safe_click(tab_children[1], "Nekobox 第二分组", sleep_interval=1):
+                # 点击失败时记录错误并结束本轮，避免后续链路连锁失败。
+                self.log.error("点击 Nekobox 第二分组失败，结束本轮", package=self.nekobox_package)
+                # 本轮提前结束，finally 仍会执行收尾。
+                return
             # 定位配置列表容器。
             parent = poco("android.widget.FrameLayout").child("android.widget.LinearLayout").offspring("moe.nb4a:id/fragment_holder").offspring("moe.nb4a:id/configuration_list").child("moe.nb4a:id/content")
-            # 先判断配置列表父节点是否存在。
-            if not parent.exists():
+            # 安全等待配置列表父节点，避免连接波动时直接崩溃。
+            if not self._safe_wait_exists(parent, 3, "Nekobox 配置列表父节点"):
                 # 记录错误日志。
                 self.log.error("未找到 Nekobox 配置列表父节点，无法继续", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
@@ -771,9 +775,15 @@ class OpenSettingsTask:
                 # 本轮提前结束，finally 仍会执行收尾。
                 return
             # 按入参索引点击目标模式节点。
-            mode_children[mode_index].click(focus=None, sleep_interval=1)
+            if not self._safe_click(mode_children[mode_index], f"Nekobox 模式节点-{mode_index}", sleep_interval=1):
+                # 点击失败时记录错误并结束本轮。
+                self.log.error("点击 Nekobox 模式节点失败，结束本轮", package=self.nekobox_package, mode_index=mode_index)
+                # 本轮提前结束，finally 仍会执行收尾。
+                return
             # 判断 stats 节点是否存在。
-            start_button_bool = poco("android.widget.FrameLayout").child("android.widget.LinearLayout").offspring("moe.nb4a:id/stats").exists()
+            start_button_node = poco("android.widget.FrameLayout").child("android.widget.LinearLayout").offspring("moe.nb4a:id/stats")
+            # 使用安全等待判断代理是否已经启动。
+            start_button_bool = self._safe_wait_exists(start_button_node, 1.5, "Nekobox 运行状态节点")
             # stats 存在时认为代理已在运行。
             if start_button_bool:
                 # 记录已运行状态。
@@ -785,9 +795,9 @@ class OpenSettingsTask:
                 # 先定位启动按钮节点，避免重复查询。
                 fab = poco("moe.nb4a:id/fab")
                 # 按钮存在才执行点击。
-                if fab.exists():
+                if self._safe_wait_exists(fab, 2, "Nekobox 启动按钮"):
                     # 点击启动代理按钮。
-                    fab.click()
+                    self._safe_click(fab, "Nekobox 启动按钮", sleep_interval=0.5)
                 # 启动按钮不存在时记录警告。
                 else:
                     # 记录按钮缺失日志。
@@ -1406,6 +1416,10 @@ class OpenSettingsTask:
         self._reset_facebook_error_reason()
         # 初始化 Facebook 成功标记，默认失败。
         facebook_ok = False
+        # 标记本轮是否需要把异常继续抛出给 worker 做运行时重建。
+        should_reraise = False
+        # 保存需要继续抛出的原始异常对象。
+        reraised_exc: Exception | None = None
         # 使用异常保护整轮任务，避免异常导致进程崩溃。
         try:
             # 获取并校验当前 worker 进程初始化好的 Poco 实例。
@@ -1441,6 +1455,14 @@ class OpenSettingsTask:
             self.facebook_error_reason = self._build_failure_msg(exc, prefix="run_once 异常")
             # 标记本轮 Facebook 结果为失败。
             facebook_ok = False
+            # 连接类异常让 worker 触发 reinit_runtime，避免任务层吞错后带病继续。
+            if self._is_poco_disconnect_error(exc) or isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError, OSError)):
+                # 记录将要升级处理的异常类型。
+                self.log.warning("检测到运行时连接异常，准备抛给 worker 进行重建", error_type=type(exc).__name__)
+                # 打开继续抛出标记。
+                should_reraise = True
+                # 保存要继续抛出的异常对象。
+                reraised_exc = exc
         # 无论是否异常都执行状态回写，保证账号状态有结果。
         finally:
             # Facebook 成功时写入 status=2, fb_status=1。
@@ -1465,8 +1487,14 @@ class OpenSettingsTask:
             except Exception as exc:
                 # 记录关闭异常，便于后续排查。
                 self.log.exception("关闭任务内 user_db 失败", error=str(exc))
-            # 任务尾部等待 30 秒，给外部观察或下轮衔接留时间。
-            sleep(30)
+            # 非连接类异常时保留尾部等待；连接类异常由 worker 立即接管恢复。
+            if not should_reraise:
+                # 任务尾部等待 30 秒，给外部观察或下轮衔接留时间。
+                sleep(30)
+        # 连接类异常在任务收尾后继续抛出给 worker，触发统一恢复流程。
+        if should_reraise and reraised_exc is not None:
+            # 继续抛出原始异常，保留完整类型和错误上下文。
+            raise reraised_exc
 
 
 # 保留模块级函数入口，统一通过 task_context 透传设备信息。

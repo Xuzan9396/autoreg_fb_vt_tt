@@ -63,7 +63,7 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；任务结束会主动关闭任务内 `UserDB` 连接，避免长期运行时连接堆积。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；任务结束会主动关闭任务内 `UserDB` 连接；若命中连接类异常（如 `BrokenPipeError`），会在回写数据库后继续抛给 worker，触发 `reinit_runtime()` 做完整重建。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
 - `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
@@ -247,6 +247,7 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 一键识别格式（固定 4 段）：`email----email_pwd----client_id----email_access_key`（第三段自动填充 `client_id`）
 - 一键识别授权码清洗：自动去除密钥中的换行和空白，兼容长密钥粘贴换行场景
 - 账号 Tab：支持“一键导入文件”（任意后缀文本文件），按 `email----email_pwd----client_id----email_access_key` 全量校验后再批量写库
+- 账号 Tab：“一键导入文件”按钮使用 `page.run_task()` 调度异步 `FilePicker.pick_files()`，兼容 Flet 同步事件循环，避免协程对象误用
 - 账号 Tab：导入可选姓名国家（法国/英国/美国/德国/西班牙/意大利），并使用 Faker 自动生成 `first_name/last_name`
 - 账号 Tab：导入时 `pwd` 统一取全局 `vt_pwd`；未配置 `vt_pwd` 时会提示先设置
 - 账号 Tab：`email_access_key` 列表展示时只显示前 10 位，其余 `...`

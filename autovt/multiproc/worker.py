@@ -156,6 +156,10 @@ def _is_retryable_runtime_error(exc: Exception, airtest_errors: dict[str, Any]) 
     # 常见 IO/连接中断错误。
     if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError, OSError)):
         return True
+    # 覆盖 Poco/hrpc 常见“连接拒绝/传输断开”文本异常（例如 TransportDisconnected）。
+    detail = str(exc).strip().lower()
+    if any(token in detail for token in ("transportdisconnected", "connection refused", "max retries exceeded", "failed to establish a new connection", "broken pipe", "device not found", "adberror", "adbshellerror")):
+        return True
 
     # Airtest 设备连接类错误。
     retryable_names = (

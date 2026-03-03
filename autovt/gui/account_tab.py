@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import inspect
 import time
 from typing import Any, Callable
 
@@ -113,14 +114,30 @@ class AccountTab:
         self.next_button = ft.OutlinedButton("下一页", icon=ft.Icons.CHEVRON_RIGHT, disabled=True, on_click=self._goto_next_page)
         # 创建姓名国家下拉框，导入时用于 Faker 生成姓名。
         self.import_country_dropdown = ft.Dropdown(
-            # 使用占位提示，避免浮动 label 与描边边框重叠导致显示异常。
-            hint_text="选择姓名国家",
             # 默认使用法国姓名。
             value="fr_FR",
             # 控件宽度。
             width=180,
+            # 固定高度，避免不同平台字体导致控件抖动。
+            height=50,
+            # 使用紧凑样式，减少上下留白。
+            dense=True,
+            # 明确设置内边距，避免文字与边框过近。
+            content_padding=ft.padding.symmetric(horizontal=12, vertical=10),
             # 选项列表（法国、英国等）。
             options=[ft.dropdown.Option(locale, label) for label, locale in NAME_COUNTRY_OPTIONS],
+            # 鼠标悬停提示当前控件用途。
+            tooltip="选择 Faker 姓名国家",
+        )
+        # 使用独立标题文本，避免 Material 浮动标签与边框重叠。
+        import_country_selector = ft.Column(
+            # 先展示标题，再展示下拉框。
+            controls=[
+                ft.Text("姓名国家", size=12, color=ft.Colors.BLUE_GREY_700),
+                self.import_country_dropdown,
+            ],
+            # 标题与输入框间距保持紧凑。
+            spacing=4,
         )
         # 创建文件选择器服务，供“一键导入文件”使用。
         self.import_file_picker = ft.FilePicker()
@@ -133,7 +150,7 @@ class AccountTab:
             controls=[
                 ft.FilledButton("新增账号", icon=ft.Icons.ADD, on_click=self._open_create_dialog),
                 ft.FilledButton("刷新账号", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
-                self.import_country_dropdown,
+                import_country_selector,
                 ft.OutlinedButton("一键导入文件", icon=ft.Icons.UPLOAD_FILE, on_click=self._pick_import_file),
             ],
             alignment=ft.MainAxisAlignment.START,
@@ -380,8 +397,25 @@ class AccountTab:
     # 表单弹窗 (新增 / 编辑)
     # ═══════════════════════════════════════════════════════════════════
 
-    async def _pick_import_file(self, _e: ft.ControlEvent | None = None) -> None:
-        """打开文件选择器，选择要导入的文本文件。"""
+    def _pick_import_file(self, _e: ft.ControlEvent | None = None) -> None:
+        """同步点击入口：调度异步文件选择任务。"""
+        # 文件选择器未初始化时直接提示。
+        if not self.import_file_picker:
+            self._show_snack("文件选择器未初始化，请重试。")
+            return
+        # 在 Flet 事件线程中调度异步任务，避免把协程对象误当成结果。
+        try:
+            # 调度真正的异步文件选择逻辑。
+            self.page.run_task(self._pick_import_file_async)
+        # 调度失败时记录日志并提示。
+        except Exception as exc:
+            # 记录异常详情，满足错误必记录要求。
+            log.exception("调度文件选择任务失败", error=str(exc))
+            # 给用户提示失败原因。
+            self._show_snack(f"打开文件选择器失败: {exc}")
+
+    async def _pick_import_file_async(self) -> None:
+        """异步打开文件选择器并处理返回文件列表。"""
         # 文件选择器未初始化时直接提示。
         if not self.import_file_picker:
             self._show_snack("文件选择器未初始化，请重试。")
@@ -404,13 +438,48 @@ class AccountTab:
         # 处理文件选择结果并执行导入。
         self._handle_import_file_result(picked_files)
 
-    def _handle_import_file_result(self, picked_files: list[Any] | None) -> None:
+    async def _resolve_picked_files_async(self, picked_files_awaitable: Any) -> None:
+        """兼容兜底：把误传的 awaitable 结果解析成文件列表。"""
+        # 等待 awaitable 真正返回文件列表。
+        try:
+            # 解析协程返回值。
+            resolved_picked_files = await picked_files_awaitable
+        # 解析失败时记录并提示。
+        except Exception as exc:
+            # 记录兜底解析失败异常。
+            log.exception("解析文件选择协程结果失败", error=str(exc))
+            # 给用户提示失败原因。
+            self._show_snack(f"读取文件选择结果失败: {exc}")
+            return
+        # 把解析后的文件列表交给统一处理逻辑。
+        self._handle_import_file_result(resolved_picked_files)
+
+    def _handle_import_file_result(self, picked_files: Any) -> None:
         """处理文件选择结果并执行批量导入。"""
+        # 兼容历史路径：若误传协程对象，自动异步解析后再继续。
+        if inspect.isawaitable(picked_files):
+            # 记录告警，便于后续追踪事件链路。
+            log.warning("检测到未 await 的文件选择结果，自动转为异步解析")
+            try:
+                # 调度 awaitable 解析任务，避免当前同步函数崩溃。
+                self.page.run_task(self._resolve_picked_files_async, picked_files)
+            # 调度兜底任务失败时记录并提示。
+            except Exception as exc:
+                # 记录调度失败异常。
+                log.exception("调度文件选择结果解析任务失败", error=str(exc))
+                # 给用户提示失败原因。
+                self._show_snack(f"读取文件选择结果失败: {exc}")
+            return
         # 用户取消选择时直接返回。
         if not picked_files:
             return
+        # 统一转为列表，兼容 tuple/list 等序列类型。
+        picked_file_list = list(picked_files)
+        # 列表为空时视为未选择文件。
+        if len(picked_file_list) == 0:
+            return
         # 仅取第一份文件路径。
-        selected_path = str(getattr(picked_files[0], "path", "") or "").strip()
+        selected_path = str(getattr(picked_file_list[0], "path", "") or "").strip()
         # 兼容极端场景：桌面端路径为空。
         if selected_path == "":
             self._show_snack("读取文件路径失败，请重新选择文件。")
