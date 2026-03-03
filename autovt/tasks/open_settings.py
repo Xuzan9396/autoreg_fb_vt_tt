@@ -1312,7 +1312,7 @@ class OpenSettingsTask:
 
 
         # 循环 5 次，处理“下一步 + 忽略”弹层。
-        for i in range(10):
+        for i in range(12):
             # 每轮先尝试点击“上传了图片下一步了”按钮：每 1 秒查一次，最多 5 次。
             sleep_interval = 20 if i == 0 else 3
             if not self.poco_find_or_click(
