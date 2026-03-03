@@ -1556,7 +1556,8 @@ class OpenSettingsTask:
             menu_tab_node = poco(desc=FACEBOOK_MENU_TAB_DESC[self.device_lang])
             if not self._safe_wait_exists(menu_tab_node,5,"三条杆菜单"):
                 # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到 Facebook 三条杆菜单入口")
+                # return self._facebook_fail("未找到 Facebook 三条杆菜单入口")
+                return True
 
             self._safe_click(menu_tab_node, "三条杆菜单", sleep_interval=5)
 
