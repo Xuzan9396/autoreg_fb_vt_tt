@@ -75,5 +75,7 @@ poco(textMatches="Oui, me connecter en tant.*").click()
 poco("Continuer").click()
 
 
+poco("android:id/content").child("com.facebook.katana:id/(name removed)").child("com.facebook.katana:id/(name removed)").child("android.widget.FrameLayout").child("android.widget.FrameLayout").child("android.widget.FrameLayout")[1].child("android.widget.FrameLayout")[1].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").offspring("androidx.recyclerview.widget.RecyclerView")[0].child("android.view.ViewGroup")[1].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup")[0].click()
+
 
 

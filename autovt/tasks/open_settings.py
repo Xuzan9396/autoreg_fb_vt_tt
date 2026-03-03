@@ -305,6 +305,59 @@ class OpenSettingsTask:
 
         return self._safe_click(node,desc,sleep_interval=sleep_interval)
 
+    # 定义“安全点击 Facebook 深层 next 节点”的方法。
+    def _safe_click_facebook_next_v2_deep(self, poco: Any) -> bool:
+        # 使用异常保护构建深层节点，避免索引越界导致流程崩溃。
+        try:
+            # 根据固定层级链路定位 next 按钮节点。
+            deep_next_node = (
+                # 从页面 content 根节点开始向下查找。
+                poco("android:id/content")
+                # 进入 Facebook 页面第一层容器。
+                .child("com.facebook.katana:id/(name removed)")
+                # 进入 Facebook 页面第二层容器。
+                .child("com.facebook.katana:id/(name removed)")
+                # 进入第一层 FrameLayout。
+                .child("android.widget.FrameLayout")
+                # 进入第二层 FrameLayout。
+                .child("android.widget.FrameLayout")
+                # 选择第三层 FrameLayout 的索引 1。
+                .child("android.widget.FrameLayout")[1]
+                # 继续选择下一层 FrameLayout 的索引 1。
+                .child("android.widget.FrameLayout")[1]
+                # 逐层进入 ViewGroup 容器。
+                .child("android.view.ViewGroup")
+                # 逐层进入 ViewGroup 容器。
+                .child("android.view.ViewGroup")
+                # 逐层进入 ViewGroup 容器。
+                .child("android.view.ViewGroup")
+                # 逐层进入 ViewGroup 容器。
+                .child("android.view.ViewGroup")
+                # 在当前层级向下查找 RecyclerView。
+                .offspring("androidx.recyclerview.widget.RecyclerView")[0]
+                # 进入 RecyclerView 的第 2 个子节点。
+                .child("android.view.ViewGroup")[1]
+                # 继续进入下一层 ViewGroup。
+                .child("android.view.ViewGroup")
+                # 继续进入下一层 ViewGroup。
+                .child("android.view.ViewGroup")
+                # 进入最终目标 ViewGroup 的第 1 个子节点。
+                .child("android.view.ViewGroup")[0]
+            )
+        # 捕获深层节点构建异常并按失败处理。
+        except Exception as exc:
+            # 统一记录异常并尝试恢复连接。
+            self._handle_safe_action_exception("build_facebook_next_v2_deep", "next输入点v2-深层路径", exc)
+            # 返回 False 表示本次定位失败。
+            return False
+        # 等待深层 next 节点出现。
+        if not self._safe_wait_exists(deep_next_node, 2, "next输入点v2-深层路径"):
+            # 返回 False 表示节点不存在。
+            return False
+        # 点击深层 next 节点并返回点击结果。
+        if  self._safe_click(deep_next_node, "next输入点v2-深层路径点击", sleep_interval=2):
+            return self._safe_click(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), "重命名名称了", sleep_interval=1)
+        return False
 
     # 定义“安全输入事件”的方法，避免使用 set_text 造成不可编辑异常。
     def _safe_input_by_event(self, node: Any, value: str, desc: str) -> bool:
@@ -1036,6 +1089,12 @@ class OpenSettingsTask:
         # 先点击 last name 节点聚焦
         self._safe_click(next_node, "next输入点点击", sleep_interval=2)
 
+        if  self._safe_wait_exists(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), 2, "输入名字后继续找到 next 说明需要确认名称了"):
+            if not self._safe_click_facebook_next_v2_deep(poco):
+                # 返回失败并记录具体错误原因。
+                return self._facebook_fail("未找到 next 输入点v2（深层路径）或点击失败")
+
+
 
         year = datetime.now().year
 
@@ -1187,6 +1246,8 @@ class OpenSettingsTask:
 
 
 
+        if  self._safe_wait_exists(poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]), 5, "再次刷新按钮v2"):
+            self._safe_click(poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]), "刷新验证码按钮v2", sleep_interval=3)
 
         # 验证码输入
         email_node = poco(text=FACEBOOK_EMAIL_CODE_INPUT[self.device_lang])
@@ -1238,7 +1299,7 @@ class OpenSettingsTask:
 
         allow_button = poco("com.android.permissioncontroller:id/permission_allow_button")
     # 安全等待权限按钮。
-        if self._safe_wait_exists(allow_button, 5, "系统权限允许按钮v2"):
+        if self._safe_wait_exists(allow_button, 10, "系统权限允许按钮v2"):
         # 点击权限按钮后等待 1 秒。
             self._safe_click(allow_button, "系统权限允许按钮", sleep_interval=2)
 

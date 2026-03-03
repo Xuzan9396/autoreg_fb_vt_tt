@@ -8,6 +8,8 @@ FACEBOOK_LAST_NAME_INPUT = {"fr": "Nom de famille", "en": "Last name"}
 FACEBOOK_FIRST_LAST_NAME_NEXT = {"fr": "Suivant", "en": "Next"}
 # Facebook 创建账号按钮文案映射（按语言）。
 FACEBOOK_CREATE_USER_BUTTON = {"fr": "Créer un compte", "en": ""}
+# 接受账号
+FACEBOOK_CHERCHER_MON_COMPTE = {"fr": "Chercher mon compte", "en": ""}
 # 有时候出现这个
 FACEBOOK_CREATE_USER_BUTTONV2 = {"fr": "Create new account", "en": ""}
 # Facebook 创建账号按钮文案映射（注册信息页，按语言）
@@ -20,7 +22,7 @@ FACEBOOK_YEAR_SET = {"fr": "SET", "en": ""}
 FACEBOOK_GENDER_MALE = {"fr": "Masculin", "en": ""}
 
 # 选择邮箱注册
-# Facebook 选择邮箱注册按钮文案映射（按语言）
+# Facebook 选择邮箱注册按钮文案映射（按语言） Rechercher avec l'adresse e-mail
 FACEBOOK_SELECT_EMAIL_SIGN_UP = {"fr": "S’inscrire avec une adresse e-mail", "en": ""}
 
 # 邮箱输入框点击

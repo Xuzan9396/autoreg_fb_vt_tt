@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # 导入 sqlite3，用于识别数据库锁冲突异常并做降级等待。
 import sqlite3
+# 导入信号模块，用于设置子进程 Ctrl+C 行为。
+import signal
 import multiprocessing as mp
 import queue
 import time
@@ -123,6 +125,19 @@ def _sleep_with_stop(stop_event: mp.Event, sec: float) -> None:
     end_at = time.time() + max(0.0, sec)
     while not stop_event.is_set() and time.time() < end_at:
         time.sleep(0.1)
+
+
+def _install_worker_signal_policy(log: Any) -> None:
+    # 在 worker 子进程中忽略 Ctrl+C（SIGINT），避免 Airtest 退出清理被打断打印 traceback。
+    try:
+        # 设置 SIGINT 为忽略，让主进程负责统一停机。
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # 记录信号策略生效日志，便于排查退出行为。
+        log.info("worker 已设置 SIGINT 忽略策略，停机由 manager 统一控制")
+    # 信号设置失败时只记录告警，不阻断主流程。
+    except Exception as exc:
+        # 记录失败详情，便于定位平台差异问题。
+        log.warning("worker 设置信号策略失败，继续按默认行为运行", error=str(exc))
 
 
 def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
@@ -367,6 +382,8 @@ def worker_main(
     # 每个子进程单独初始化日志（单独文件 + 终端 JSON）。
     setup_logging(process_role="worker", serial=serial)
     log = get_logger("worker")
+    # 应用 worker 信号策略，避免 Ctrl+C 直接打断子进程清理逻辑。
+    _install_worker_signal_policy(log)
     log.info("worker 进程启动", serial=serial, loop_interval_sec=loop_interval_sec)
 
     # 子进程内独立数据库连接：用于原子分配 t_user、读取 t_config 映射。

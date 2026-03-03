@@ -58,8 +58,8 @@ class SettingsTab:
             keyboard_type=ft.KeyboardType.NUMBER,
             # 限制最多输入 1 位数字，避免输入多位值。
             max_length=1,
-            # 在 UI 输入层仅允许 0 到 5，直接拦截非法字符。
-            input_filter=ft.InputFilter(regex_string=r"[0-5]", allow=True),
+            # 输入变化时做“可删除”的软校验，避免硬拦截导致无法清空。
+            on_change=self._sanitize_status_23_retry_input,
             on_submit=self.save_config,
         )
         # 创建全局 vinted 密码输入框。
@@ -114,6 +114,52 @@ class SettingsTab:
             spacing=10,
             expand=True,
         )
+
+    def _sanitize_status_23_retry_input(self, _e: ft.ControlEvent | None = None) -> None:
+        """软校验 status_23_retry_max_num 输入：允许清空，限制 0~5。"""
+        # 输入框未初始化时直接返回。
+        if not self.status_23_retry_value_input:
+            return
+        # 读取当前输入框原始值。
+        raw_value = str(self.status_23_retry_value_input.value or "")
+        # 清理首尾空白。
+        clean_value = raw_value.strip()
+        # 允许用户先删除为空，便于重新输入。
+        if clean_value == "":
+            # 值已经是空时无需再改动。
+            if self.status_23_retry_value_input.value == "":
+                return
+            # 把值归一化为空字符串。
+            self.status_23_retry_value_input.value = ""
+            # 刷新页面让 UI 立即同步。
+            try:
+                self.page.update()
+            # 刷新失败时记录日志但不抛异常。
+            except Exception as exc:
+                log.exception("清空重试次数输入框时刷新页面失败", error=str(exc))
+            return
+        # 只保留数字字符，兼容粘贴场景。
+        digit_chars = "".join(ch for ch in clean_value if ch.isdigit())
+        # 没有任何数字时归一化为空。
+        if digit_chars == "":
+            normalized_value = ""
+        else:
+            # 只取首位数字，保持和 max_length=1 一致。
+            normalized_value = digit_chars[0]
+            # 超过 5 时自动截断到 5。
+            if int(normalized_value) > 5:
+                normalized_value = "5"
+        # 值未变化时无需更新，避免无效刷新。
+        if normalized_value == self.status_23_retry_value_input.value:
+            return
+        # 回填标准化后的值。
+        self.status_23_retry_value_input.value = normalized_value
+        # 刷新页面让 UI 立即显示标准化结果。
+        try:
+            self.page.update()
+        # 刷新失败时记录日志，避免事件链路中断。
+        except Exception as exc:
+            log.exception("标准化重试次数输入框时刷新页面失败", error=str(exc))
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新设置 Tab 数据。"""
