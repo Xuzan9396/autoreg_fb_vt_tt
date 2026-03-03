@@ -141,7 +141,7 @@ def _install_worker_signal_policy(log: Any) -> None:
 
 
 def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
-    # 从 t_config 映射读取“status=2/3 同账号重试次数”配置，并做 0~5 边界保护。
+    # 从 t_config 映射读取“同账号额外重试次数”配置，并做 0~5 边界保护。
     # 读取配置原始值，缺失时回退默认值 0。
     raw_value = str(config_map.get(STATUS_23_RETRY_MAX_KEY, STATUS_23_RETRY_MAX_DEFAULT)).strip()
     # 尝试解析整数。
@@ -403,16 +403,25 @@ def worker_main(
 
     # 当前设备绑定的一条账号记录。
     assigned_user: dict[str, Any] | None = None
-    # 记录当前账号在 status=2/3 下“已执行的额外重试次数”（不包含首轮执行）。
+    # 记录当前账号“已执行的额外重试次数”（不包含首轮执行）。
     assigned_status_23_retry_used = 0
     # 标记是否处于“无可用账号等待中”，避免重复刷屏日志。
     waiting_for_user = False
 
+    # 定义“是否允许同账号重试”的局部判断方法。
+    def _should_retry_same_user(status: int, fb_status: int) -> bool:
+        # 当 Facebook 状态已成功时，禁止继续重试同一账号，避免重复执行。
+        if fb_status == 1:
+            # 返回 False，表示不允许重试。
+            return False
+        # 仅账号状态为 3（失败）时允许重试；状态 2（已使用）不再重试。
+        return status == 3
+
     def _ensure_assigned_user(config_map: dict[str, str]) -> dict[str, Any] | None:
-        """确保当前设备拿到一条可运行账号（status=1），并支持 status=2/3 同账号重试。"""
+        """确保当前设备拿到一条可运行账号（status=1），并仅对失败账号做同账号重试。"""
         nonlocal assigned_user, assigned_status_23_retry_used
 
-        # 读取 status=2/3 同账号重试次数配置（0=不重试，1=重试一次）。
+        # 读取同账号重试次数配置（0=不重试，1=重试一次）。
         retry_limit = _read_status_23_retry_limit(config_map)
 
         # 优先刷新当前内存账号，避免每轮重复抢占。
@@ -425,30 +434,50 @@ def worker_main(
             if latest is not None and str(latest.get("device", "")).strip() == serial:
                 # 读取数据库中的最新 status。
                 current_status = int(latest.get("status", 0))
+                # 读取数据库中的最新 fb_status。
+                current_fb_status = int(latest.get("fb_status", 0))
                 # 读取邮箱用于日志追踪。
                 email_account = str(latest.get("email_account", "")).strip()
                 # status=1 表示“仍在使用中”，继续跑同一个账号，不切换。
                 if current_status == 1:
                     # 更新本地缓存为最新记录。
                     assigned_user = dict(latest)
-                    # 回到运行中时清空 2/3 重试计数。
+                    # 回到运行中时清空额外重试计数。
                     assigned_status_23_retry_used = 0
                     # 返回当前账号，继续执行任务。
                     return assigned_user
-                # status=2/3 时按配置决定是否继续同账号重试。
+                # status=2/3 时按“失败才重试、成功不重试”规则处理。
                 if current_status in {2, 3}:
+                    # 不满足重试条件时释放绑定并切换新账号。
+                    if not _should_retry_same_user(current_status, current_fb_status):
+                        # 释放当前账号与设备绑定，避免同账号重复执行。
+                        user_db.clear_device_by_user_id(user_id)
+                        # 记录“跳过重试”的决策日志，便于回溯为何切换账号。
+                        log.info(
+                            "账号状态不满足重试条件，释放设备绑定并切换新账号",
+                            serial=serial,
+                            user_id=user_id,
+                            status=current_status,
+                            fb_status=current_fb_status,
+                            email_account=email_account,
+                        )
+                        # 清空当前账号缓存。
+                        assigned_user = None
+                        # 清空当前账号的重试计数。
+                        assigned_status_23_retry_used = 0
                     # 未超过最大重试次数时继续复用同账号。
-                    if assigned_status_23_retry_used < retry_limit:
+                    elif assigned_status_23_retry_used < retry_limit:
                         # 进入一次新的重试轮次并累加计数。
                         assigned_status_23_retry_used += 1
                         # 更新本地缓存为最新记录。
                         assigned_user = dict(latest)
                         # 记录“同账号重试”日志，便于排查。
                         log.info(
-                            "账号状态为 2/3，继续复用当前账号重试",
+                            "账号状态为 3 且 fb_status 非成功，继续复用当前账号重试",
                             serial=serial,
                             user_id=user_id,
                             status=current_status,
+                            fb_status=current_fb_status,
                             email_account=email_account,
                             retry_index=assigned_status_23_retry_used,
                             retry_limit=retry_limit,
@@ -459,10 +488,11 @@ def worker_main(
                     user_db.clear_device_by_user_id(user_id)
                     # 记录释放日志，明确为什么切账号。
                     log.info(
-                        "账号状态为 2/3 且重试已达上限，释放设备绑定",
+                        "账号状态为 3 且重试已达上限，释放设备绑定",
                         serial=serial,
                         user_id=user_id,
                         status=current_status,
+                        fb_status=current_fb_status,
                         email_account=email_account,
                         retry_count=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
@@ -502,29 +532,49 @@ def worker_main(
             bound_user_id = int(bound_row.get("id", 0))
             # 读取绑定账号状态。
             bound_status = int(bound_row.get("status", 0))
+            # 读取绑定账号 Facebook 状态。
+            bound_fb_status = int(bound_row.get("fb_status", 0))
             # 读取绑定邮箱用于日志追踪。
             bound_email = str(bound_row.get("email_account", "")).strip()
             # 绑定且运行中时直接复用。
             if bound_status == 1:
                 # 写回当前账号缓存。
                 assigned_user = dict(bound_row)
-                # 清空 2/3 重试计数。
+                # 清空额外重试计数。
                 assigned_status_23_retry_used = 0
                 # 返回绑定账号。
                 return assigned_user
-            # 绑定账号处于 2/3 状态时按配置决定是否继续同账号重试。
+            # 绑定账号处于 2/3 状态时按“失败才重试、成功不重试”规则处理。
             if bound_status in {2, 3}:
+                # 不满足重试条件时释放绑定并等待新账号。
+                if not _should_retry_same_user(bound_status, bound_fb_status):
+                    # 释放当前绑定账号，避免重复执行已成功账号。
+                    user_db.clear_device_by_user_id(bound_user_id)
+                    # 记录“跳过重试”日志。
+                    log.info(
+                        "设备绑定账号不满足重试条件，释放绑定等待新账号",
+                        serial=serial,
+                        user_id=bound_user_id,
+                        status=bound_status,
+                        fb_status=bound_fb_status,
+                        email_account=bound_email,
+                    )
+                    # 重置重试计数器。
+                    assigned_status_23_retry_used = 0
+                    # 清空账号缓存，进入新分配流程。
+                    assigned_user = None
                 # 未超过上限则继续同账号重试。
-                if assigned_status_23_retry_used < retry_limit:
+                elif assigned_status_23_retry_used < retry_limit:
                     # 累加重试次数。
                     assigned_status_23_retry_used += 1
                     # 写回当前账号缓存。
                     assigned_user = dict(bound_row)
                     log.info(
-                        "发现设备绑定账号处于 2/3，继续复用当前账号重试",
+                        "发现设备绑定账号处于 3 且 fb_status 非成功，继续复用当前账号重试",
                         serial=serial,
                         user_id=bound_user_id,
                         status=bound_status,
+                        fb_status=bound_fb_status,
                         email_account=bound_email,
                         retry_index=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
@@ -534,10 +584,11 @@ def worker_main(
                 # 达上限后释放绑定，允许分配新账号。
                 user_db.clear_device_by_user_id(bound_user_id)
                 log.info(
-                    "设备绑定账号处于 2/3 且重试达上限，释放绑定等待新账号",
+                    "设备绑定账号处于 3 且重试达上限，释放绑定等待新账号",
                     serial=serial,
                     user_id=bound_user_id,
                     status=bound_status,
+                    fb_status=bound_fb_status,
                     email_account=bound_email,
                     retry_count=assigned_status_23_retry_used,
                     retry_limit=retry_limit,

@@ -279,7 +279,7 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 账号领取使用 SQLite 事务写锁（`BEGIN IMMEDIATE`）保证并发安全，避免多设备抢到同一账号
 - 同一时刻每条 `t_user` 只会被一个设备占用（通过 `status+device` 双条件控制）
 - 当当前账号仍为 `status=1` 时，worker 会持续复用同一账号执行，不会切换新账号
-- 当当前账号变为 `status=2/3` 时，worker 会按 `status_23_retry_max_num` 对同一账号执行对应次数的“额外重试”（例如配置 `3` 就额外重试 `3` 次）；超过上限后才释放并切换新账号
+- 当当前账号变为 `status=3` 且 `fb_status!=1` 时，worker 会按 `status_23_retry_max_num` 对同一账号执行对应次数的“额外重试”（例如配置 `3` 就额外重试 `3` 次）；`fb_status=1` 或 `status=2` 时不会重复执行该账号，会直接释放并切换新账号
 - 若无可用账号（无 `status=0`），worker 进入 `waiting` 状态并睡眠等待，不执行自动化任务
 - waiting 状态改为低频轮询：`WORKER_WAITING_POLL_INTERVAL_SEC=8.0`（默认），避免子进程高频空转和频繁打 SQLite
 - worker 遇到 SQLite 锁冲突（`database is locked/busy`）会降级为 waiting 并延迟重试，不会直接崩溃
