@@ -188,6 +188,10 @@ class UserDB:
         app_name: str = DEFAULT_APP_DIR_NAME,
         # 可选数据库文件名，默认 user.db。
         db_filename: str = DEFAULT_DB_FILENAME,
+        # 可选 SQLite 连接超时（秒），未传时使用全局默认值。
+        connect_timeout_sec: float = SQLITE_CONNECT_TIMEOUT_SEC,
+        # 可选 SQLite busy_timeout（毫秒），未传时使用全局默认值。
+        busy_timeout_ms: int = SQLITE_BUSY_TIMEOUT_MS,
     # 初始化方法不返回值。
     ) -> None:
         # 如果调用方没有传入数据库路径。
@@ -198,6 +202,10 @@ class UserDB:
         else:
             # 把传入路径统一转为 Path 对象。
             self.db_path = Path(db_path)
+        # 记录当前实例的 SQLite 连接超时配置（秒）。
+        self._connect_timeout_sec = max(float(connect_timeout_sec), 0.1)
+        # 记录当前实例的 SQLite busy_timeout 配置（毫秒）。
+        self._busy_timeout_ms = max(int(busy_timeout_ms), 0)
         # 初始化连接对象缓存，首次使用时再创建连接。
         self._conn: sqlite3.Connection | None = None
 
@@ -217,11 +225,11 @@ class UserDB:
         # 再次确保父目录存在，防止路径目录缺失。
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # 创建 SQLite 连接并绑定到当前数据库文件。
-        self._conn = sqlite3.connect(str(self.db_path), timeout=SQLITE_CONNECT_TIMEOUT_SEC)
+        self._conn = sqlite3.connect(str(self.db_path), timeout=self._connect_timeout_sec)
         # 设置行工厂为 Row，便于按列名读取数据。
         self._conn.row_factory = sqlite3.Row
         # 设置锁等待超时为 30 秒，降低多进程并发写时的锁冲突报错概率。
-        self._conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
+        self._conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms};")
         # 开启 WAL 模式，提升并发读写稳定性。
         self._conn.execute("PRAGMA journal_mode=WAL;")
         # 设置 WAL 自动 checkpoint，避免 WAL 文件无限增大。

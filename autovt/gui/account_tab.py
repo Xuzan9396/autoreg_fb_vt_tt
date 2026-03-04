@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import csv
 import io
 import re
@@ -206,15 +207,27 @@ class AccountTab:
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新账号列表数据。"""
+        # 记录刷新总起点，便于输出完整耗时。
+        started_at = time.monotonic()
+        # 初始化 count 查询耗时（毫秒）。
+        count_elapsed_ms = 0
+        # 初始化列表查询耗时（毫秒）。
+        list_elapsed_ms = 0
+        # 初始化渲染提交耗时（毫秒）。
+        render_elapsed_ms = 0
         if self._refreshing or not self.list_column:
             return
         self._refreshing = True
         try:
+            # 记录 count 查询起点。
+            step_started_at = time.monotonic()
             email_kw, status_f, fb_f, vinted_f, titok_f = self._get_filter_values()
             total_count = self.user_db.count_users_filtered(
                 email_keyword=email_kw, status=status_f,
                 fb_status=fb_f, vinted_status=vinted_f, titok_status=titok_f,
             )
+            # 统计 count 查询耗时。
+            count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
             total_pages = max((int(total_count) + ACCOUNT_PAGE_SIZE - 1) // ACCOUNT_PAGE_SIZE, 1)
             self._total = int(total_count)
             self._total_pages = int(total_pages)
@@ -224,20 +237,80 @@ class AccountTab:
             if self._page_index < 1:
                 self._page_index = 1
 
+            # 记录列表查询起点。
+            step_started_at = time.monotonic()
             rows = self.user_db.list_users_page_filtered(
                 page=self._page_index, page_size=ACCOUNT_PAGE_SIZE,
                 email_keyword=email_kw, status=status_f,
                 fb_status=fb_f, vinted_status=vinted_f, titok_status=titok_f,
             )
+            # 统计列表查询耗时。
+            list_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+
+            # 记录渲染提交起点。
+            step_started_at = time.monotonic()
             self._render_rows(rows)
             self._update_summary(self._total, len(rows))
             self._update_pagination()
             if source == "manual" and show_toast:
                 self._show_snack(f"账号列表已刷新，第 {self._page_index} 页共 {len(rows)} 条。")
             self.page.update()
+            # 统计渲染提交耗时。
+            render_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+
+            # 计算本次刷新总耗时。
+            total_elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            # 总耗时较长时输出告警日志，便于定位卡顿段。
+            if total_elapsed_ms >= 1200:
+                log.warning(
+                    "账号页刷新耗时较长",
+                    source=source,
+                    total_elapsed_ms=total_elapsed_ms,
+                    count_elapsed_ms=count_elapsed_ms,
+                    list_elapsed_ms=list_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                    page_index=self._page_index,
+                    total_count=self._total,
+                    page_rows=len(rows),
+                )
+            # 总耗时正常时输出调试日志。
+            else:
+                log.debug(
+                    "账号页刷新完成",
+                    source=source,
+                    total_elapsed_ms=total_elapsed_ms,
+                    count_elapsed_ms=count_elapsed_ms,
+                    list_elapsed_ms=list_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                    page_index=self._page_index,
+                    total_count=self._total,
+                    page_rows=len(rows),
+                )
         except Exception as exc:
-            log.exception("刷新账号列表失败", source=source)
-            self._show_snack(f"刷新账号失败: {exc}")
+            # 数据库锁冲突时快速返回，避免卡住 GUI 线程。
+            if self._is_sqlite_locked_error(exc):
+                # 记录锁冲突告警，便于排查并发写压力。
+                log.warning(
+                    "刷新账号列表遇到 SQLite 锁冲突，已跳过本轮刷新",
+                    source=source,
+                    error=str(exc),
+                    count_elapsed_ms=count_elapsed_ms,
+                    list_elapsed_ms=list_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                )
+                # 手动刷新时给用户提示，自动刷新场景避免刷屏。
+                if source == "manual" and show_toast:
+                    self._show_snack("数据库忙，请稍后重试刷新。")
+            # 非锁冲突按原逻辑记录并提示。
+            else:
+                log.exception(
+                    "刷新账号列表失败",
+                    source=source,
+                    count_elapsed_ms=count_elapsed_ms,
+                    list_elapsed_ms=list_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                )
+                self._show_snack(f"刷新账号失败: {exc}")
         finally:
             self._refreshing = False
 
@@ -363,6 +436,17 @@ class AccountTab:
     # ═══════════════════════════════════════════════════════════════════
     # 筛选
     # ═══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _is_sqlite_locked_error(exc: Exception) -> bool:
+        """判断是否为 SQLite 锁冲突异常。"""
+        # 非 sqlite OperationalError 直接返回 False。
+        if not isinstance(exc, sqlite3.OperationalError):
+            return False
+        # 提取异常文本并转小写，便于关键字匹配。
+        detail = str(exc).strip().lower()
+        # 命中 locked/busy 关键字时判定为锁冲突。
+        return "database is locked" in detail or "database is busy" in detail or "locked" in detail
 
     @staticmethod
     def _parse_optional_int(raw_value: str | None) -> int | None:
@@ -769,9 +853,32 @@ class AccountTab:
         self._open_form_dialog(dialog_title="新增账号", row=None)
 
     def _open_edit_dialog(self, row: dict[str, Any]) -> None:
-        self._open_form_dialog(dialog_title="编辑账号", row=row)
+        # 提取 user_id，便于日志定位慢点。
+        user_id = int(row.get("id", 0))
+        # 记录“编辑弹窗”打开起点。
+        started_at = time.monotonic()
+        # 记录点击编辑按钮请求日志。
+        log.info("收到编辑账号请求", user_id=user_id)
+        try:
+            # 打开编辑弹窗。
+            self._open_form_dialog(dialog_title="编辑账号", row=row)
+            # 计算打开编辑弹窗总耗时。
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            # 打开耗时较长时输出告警。
+            if elapsed_ms >= 500:
+                log.warning("打开编辑账号弹窗耗时较长", user_id=user_id, elapsed_ms=elapsed_ms)
+            # 打开耗时正常时输出调试日志。
+            else:
+                log.debug("打开编辑账号弹窗完成", user_id=user_id, elapsed_ms=elapsed_ms)
+        except Exception as exc:
+            # 记录打开编辑弹窗失败异常栈。
+            log.exception("打开编辑账号弹窗失败", user_id=user_id, error=str(exc))
+            # 给用户可读提示，避免“点了没反应”。
+            self._show_snack(f"打开编辑弹窗失败: {exc}")
 
     def _open_form_dialog(self, dialog_title: str, row: dict[str, Any] | None) -> None:
+        # 记录构建弹窗起点时间。
+        started_at = time.monotonic()
         self._editing_user_id = int(row.get("id", 0)) if row else None
         v = lambda k, d="": str(row.get(k, d)) if row else d  # noqa: E731
         self._editing_device_value = v("device", "")
@@ -840,7 +947,13 @@ class AccountTab:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+        # 调起弹窗显示。
         self.page.show_dialog(dialog)
+        # 强制刷新页面，避免“点击后无反应直到下一次 update”。
+        self.page.update()
+        # 记录弹窗构建和展示耗时。
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        log.info("账号弹窗已展示", dialog_title=dialog_title, editing_user_id=self._editing_user_id, elapsed_ms=elapsed_ms)
 
     @staticmethod
     def _normalize_access_key(raw_key: str) -> str:
@@ -904,7 +1017,10 @@ class AccountTab:
             self._show_snack(f"识别失败: {exc}")
 
     def _close_dialog(self, _e: ft.ControlEvent | None = None) -> None:
+        # 关闭当前弹窗。
         self.page.pop_dialog()
+        # 强制提交页面更新，确保弹窗立即消失。
+        self.page.update()
 
     def _collect_form_record(self) -> UserRecord:
         g = lambda ctrl: str(ctrl.value if ctrl else "").strip()  # noqa: E731
@@ -963,7 +1079,10 @@ class AccountTab:
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+        # 调起删除确认弹窗显示。
         self.page.show_dialog(dialog)
+        # 强制刷新页面，避免“点击删除后弹窗延迟显示”。
+        self.page.update()
 
     def _delete(self, user_id: int) -> None:
         safe_id = int(user_id)

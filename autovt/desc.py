@@ -83,6 +83,9 @@ FACEBOOK_ADD_PHOTO_POPUP = {"fr": "Ajouter une photo", "en": ""}
 FACEBOOK_PROFILE_PHOTO_BUTTON = {"fr": "votre photo de profil", "en": ""}
 
 FACEBOOK_PROFILE_PHOTO_BUTTON_2 = {"fr": "Ajouter", "en": ""}
+
+FACEBOOK_PROFILE_PHOTO_BUTTON_3 = {"fr": "Photo de profil", "en": ""}
+
 # 选择唤醒相册
 # Choisir une photo de profil
 FACEBOOK_PROFILE_PHOTO_BOTTOM_BUTTON = {"fr": "Choisir une photo de profil", "en": ""}

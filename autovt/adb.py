@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -344,15 +345,29 @@ def _run_adb_devices(adb_bin: str, server_args: list[str]) -> subprocess.Complet
 
 def list_online_serials() -> list[str]:
     """读取 adb 在线设备 serial 列表。"""
+    # 记录本次读取在线设备总起点，用于输出完整耗时。
+    started_at = time.monotonic()
+    # 初始化首轮 adb devices 耗时（毫秒）。
+    first_try_elapsed_ms = 0
+    # 初始化 adb recover（kill/start）阶段耗时（毫秒）。
+    recover_elapsed_ms = 0
+    # 初始化重试 adb devices 耗时（毫秒）。
+    retry_elapsed_ms = 0
+    # 标记是否执行过恢复流程。
+    recovered = False
     try:
         # 先解析 adb 绝对路径，兼容 Finder 启动的 .app 环境。
         adb_bin = resolve_adb_bin()
         # 构建 server 参数，确保与 Airtest 使用同一 adb server。
         server_args = _build_adb_server_args()
+        # 记录首轮 adb devices 起点。
+        first_try_started_at = time.monotonic()
         # 先执行一次 adb devices。
         result = _run_adb_devices(adb_bin=adb_bin, server_args=server_args)
+        # 计算首轮 adb devices 耗时。
+        first_try_elapsed_ms = int((time.monotonic() - first_try_started_at) * 1000)
         # 记录执行成功调试日志。
-        log.debug("执行 adb devices 成功", server_addr=ADB_SERVER_ADDR)
+        log.debug("执行 adb devices 成功", server_addr=ADB_SERVER_ADDR, first_try_elapsed_ms=first_try_elapsed_ms)
     except FileNotFoundError as exc:
         # 机器上没装 adb 或 PATH 里找不到 adb 时，给出清晰报错。
         log.exception("未找到 adb 命令")
@@ -366,20 +381,42 @@ def list_online_serials() -> list[str]:
             "adb devices 超时，尝试恢复 adb server",
             server_addr=ADB_SERVER_ADDR,
             timeout_sec=ADB_DEVICES_TIMEOUT_SEC,
+            first_try_elapsed_ms=first_try_elapsed_ms,
             error=str(exc),
         )
+        # 标记本次已执行恢复流程。
+        recovered = True
+        # 记录恢复流程起点。
+        recover_started_at = time.monotonic()
         # 执行一次 adb server 恢复流程。
         _recover_adb_server(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+        # 计算恢复流程耗时。
+        recover_elapsed_ms = int((time.monotonic() - recover_started_at) * 1000)
         # 恢复后再尝试一次 adb devices，仍失败时返回空列表避免卡住界面。
         try:
+            # 记录重试 adb devices 起点。
+            retry_started_at = time.monotonic()
             # 再次执行 adb devices。
             result = _run_adb_devices(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+            # 计算重试 adb devices 耗时。
+            retry_elapsed_ms = int((time.monotonic() - retry_started_at) * 1000)
             # 记录恢复后成功日志。
-            log.info("adb devices 重试成功", server_addr=ADB_SERVER_ADDR)
+            log.info(
+                "adb devices 重试成功",
+                server_addr=ADB_SERVER_ADDR,
+                recover_elapsed_ms=recover_elapsed_ms,
+                retry_elapsed_ms=retry_elapsed_ms,
+            )
         # 重试仍失败时按“无设备”处理，不抛异常阻断 GUI。
         except Exception as retry_exc:
             # 记录重试失败原因。
-            log.error("adb devices 重试失败，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(retry_exc))
+            log.error(
+                "adb devices 重试失败，按无设备处理",
+                server_addr=ADB_SERVER_ADDR,
+                recover_elapsed_ms=recover_elapsed_ms,
+                retry_elapsed_ms=retry_elapsed_ms,
+                error=str(retry_exc),
+            )
             # 返回空列表，避免刷新线程被异常中断。
             return []
     except subprocess.CalledProcessError as exc:
@@ -391,26 +428,56 @@ def list_online_serials() -> list[str]:
             stderr=str(getattr(exc, "stderr", "")).strip(),
             stdout=str(getattr(exc, "stdout", "")).strip(),
         )
+        # 标记本次已执行恢复流程。
+        recovered = True
+        # 记录恢复流程起点。
+        recover_started_at = time.monotonic()
         # 执行一次恢复流程。
         _recover_adb_server(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+        # 计算恢复流程耗时。
+        recover_elapsed_ms = int((time.monotonic() - recover_started_at) * 1000)
         # 恢复后再尝试一次，仍失败则返回空列表。
         try:
+            # 记录重试 adb devices 起点。
+            retry_started_at = time.monotonic()
             # 再次执行 adb devices。
             result = _run_adb_devices(adb_bin=resolve_adb_bin(), server_args=_build_adb_server_args())
+            # 计算重试 adb devices 耗时。
+            retry_elapsed_ms = int((time.monotonic() - retry_started_at) * 1000)
             # 记录恢复后成功日志。
-            log.info("adb devices 恢复后成功", server_addr=ADB_SERVER_ADDR)
+            log.info(
+                "adb devices 恢复后成功",
+                server_addr=ADB_SERVER_ADDR,
+                recover_elapsed_ms=recover_elapsed_ms,
+                retry_elapsed_ms=retry_elapsed_ms,
+            )
         # 重试仍失败则按空列表处理，保证 GUI 不会卡住。
         except Exception as retry_exc:
             # 记录最终失败日志。
-            log.error("adb devices 恢复后仍失败，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(retry_exc))
+            log.error(
+                "adb devices 恢复后仍失败，按无设备处理",
+                server_addr=ADB_SERVER_ADDR,
+                recover_elapsed_ms=recover_elapsed_ms,
+                retry_elapsed_ms=retry_elapsed_ms,
+                error=str(retry_exc),
+            )
             # 返回空列表，避免阻断主流程。
             return []
     except Exception as exc:
         # 记录未知异常，按空列表处理，避免刷新设备时界面卡住。
-        log.error("adb devices 未知异常，按无设备处理", server_addr=ADB_SERVER_ADDR, error=str(exc))
+        log.error(
+            "adb devices 未知异常，按无设备处理",
+            server_addr=ADB_SERVER_ADDR,
+            first_try_elapsed_ms=first_try_elapsed_ms,
+            recover_elapsed_ms=recover_elapsed_ms,
+            retry_elapsed_ms=retry_elapsed_ms,
+            error=str(exc),
+        )
         # 返回空列表，保证刷新链路稳定。
         return []
 
+    # 记录解析输出阶段起点。
+    parse_started_at = time.monotonic()
     # 最终返回的在线设备 serial 列表。
     serials: list[str] = []
     # 第一行是标题（List of devices attached），从第二行开始解析。
@@ -431,6 +498,37 @@ def list_online_serials() -> list[str]:
         if status == "device":
             # 只接收状态为 device 的设备（offline/unauthorized 不加入）。
             serials.append(serial)
+
+    # 计算解析输出阶段耗时。
+    parse_elapsed_ms = int((time.monotonic() - parse_started_at) * 1000)
+    # 计算本次读取在线设备总耗时。
+    total_elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    # 总耗时较长时记录告警，便于定位是否是定时刷新导致卡顿。
+    if total_elapsed_ms >= 1200:
+        log.warning(
+            "读取在线设备耗时较长",
+            server_addr=ADB_SERVER_ADDR,
+            total_elapsed_ms=total_elapsed_ms,
+            first_try_elapsed_ms=first_try_elapsed_ms,
+            recover_elapsed_ms=recover_elapsed_ms,
+            retry_elapsed_ms=retry_elapsed_ms,
+            parse_elapsed_ms=parse_elapsed_ms,
+            recovered=recovered,
+            online_count=len(serials),
+        )
+    # 总耗时正常时记录调试日志，便于后续对比。
+    else:
+        log.debug(
+            "读取在线设备完成",
+            server_addr=ADB_SERVER_ADDR,
+            total_elapsed_ms=total_elapsed_ms,
+            first_try_elapsed_ms=first_try_elapsed_ms,
+            recover_elapsed_ms=recover_elapsed_ms,
+            retry_elapsed_ms=retry_elapsed_ms,
+            parse_elapsed_ms=parse_elapsed_ms,
+            recovered=recovered,
+            online_count=len(serials),
+        )
 
     # 把在线 serial 列表交给上层。
     # log.info("读取在线设备完成", count=len(serials), serials=serials)

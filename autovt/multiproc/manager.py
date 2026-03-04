@@ -3,6 +3,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,15 +18,43 @@ except Exception:
     # 标记为 None，后续分支里自动走兼容逻辑。
     psutil = None
 
-from autovt.adb import list_online_serials
+from autovt.adb import list_online_serials, resolve_adb_bin
 from autovt.logs import get_logger
 from autovt.multiproc.worker import worker_main
-from autovt.settings import WORKER_STOP_FORCE_TIMEOUT_SEC, WORKER_STOP_GRACE_TIMEOUT_SEC
+from autovt.settings import ADB_SERVER_ADDR, WORKER_STOP_FORCE_TIMEOUT_SEC, WORKER_STOP_GRACE_TIMEOUT_SEC
 from autovt.userdb import UserDB
 
 log = get_logger("manager")
 # 启动探针等待秒数：用于识别“启动即退出”的秒退进程。
 WORKER_STARTUP_PROBE_SEC = 0.4
+# Facebook 应用包名（卸载时使用）。
+FACEBOOK_PACKAGE_NAME = "com.facebook.katana"
+# Facebook 安装包相对路径（安装时使用）。
+FACEBOOK_APK_RELATIVE_PATH = Path("apks") / "facebook.apk"
+# Yosemite 输入法包名（安装后用于识别应用）。
+YOSEMITE_PACKAGE_NAME = "com.netease.nie.yosemite"
+# Yosemite 安装包相对路径（airtest 资源目录）。
+YOSEMITE_APK_RELATIVE_PATH = Path("airtest") / "core" / "android" / "static" / "apks" / "Yosemite.apk"
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    """返回子进程启动参数（Windows 下隐藏 adb 命令窗口）。"""
+    # 非 Windows 平台无需额外参数。
+    if not sys.platform.lower().startswith("win"):
+        return {}
+    # 优先使用 Python 常量，旧环境兜底硬编码值。
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    # 构造 Windows 启动信息对象。
+    startupinfo = subprocess.STARTUPINFO()
+    # 使用窗口显示控制标志。
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    # SW_HIDE：隐藏窗口。
+    startupinfo.wShowWindow = 0
+    # 返回窗口隐藏参数。
+    return {
+        "creationflags": create_no_window,
+        "startupinfo": startupinfo,
+    }
 
 
 def _ensure_spawn_pythonpath() -> None:
@@ -94,6 +124,311 @@ class DeviceProcessManager:
         # 从 adb 读取当前在线设备列表。
         serials = list_online_serials()
         return serials
+
+    def _build_adb_server_args(self) -> list[str]:
+        """构建 adb server 参数，保证命令与运行时使用同一 server。"""
+        # 读取 server 地址配置并清理空白。
+        raw_addr = str(ADB_SERVER_ADDR or "").strip()
+        # 配置为空时回退本地默认 server。
+        if raw_addr == "":
+            return ["-H", "127.0.0.1", "-P", "5037"]
+        # 配置为 host:port 时解析 host 和 port。
+        if ":" in raw_addr:
+            host_part, port_part = raw_addr.rsplit(":", 1)
+            host_value = host_part.strip() or "127.0.0.1"
+            port_value = port_part.strip() or "5037"
+            return ["-H", host_value, "-P", port_value]
+        # 仅配置 host 时，端口回退 5037。
+        return ["-H", raw_addr, "-P", "5037"]
+
+    def _run_adb_for_serial(self, serial: str, args: list[str], timeout_sec: float) -> subprocess.CompletedProcess[str]:
+        """执行 adb 子命令并返回结果（不抛 check 异常，由调用方解析）。"""
+        # 解析当前可用 adb 绝对路径。
+        adb_bin = resolve_adb_bin()
+        # 组装完整命令：adb + server 参数 + 设备 serial + 子命令。
+        cmd = [adb_bin, *self._build_adb_server_args(), "-s", str(serial), *args]
+        # 执行命令并返回结果对象。
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(1.0, float(timeout_sec)),
+            **_hidden_subprocess_kwargs(),
+        )
+
+    def _resolve_facebook_apk_path(self) -> Path:
+        """解析 facebook.apk 路径，优先使用“可执行文件同级 apks”外置目录。"""
+        # 保存候选路径，按优先级依次尝试。
+        candidates: list[Path] = []
+        # 解析当前可执行文件所在目录（源码模式通常是 Python 所在目录，打包模式是 exe/app 内部目录）。
+        exe_dir = Path(sys.executable).resolve().parent
+        # 候选 1：可执行文件同级目录下的 apks/facebook.apk（用户要求的主路径）。
+        candidates.append(exe_dir / FACEBOOK_APK_RELATIVE_PATH)
+        # 候选 2：可执行文件上一级目录下的 apks/facebook.apk（部分打包目录结构兜底）。
+        candidates.append(exe_dir.parent / FACEBOOK_APK_RELATIVE_PATH)
+        # 候选 3：macOS .app 场景下，app 包外层目录同级 apks/facebook.apk。
+        try:
+            candidates.append(exe_dir.parents[2] / FACEBOOK_APK_RELATIVE_PATH)
+        except Exception:
+            # 非 .app 目录结构时忽略该候选。
+            pass
+        # 候选 4：当前工作目录下的 apks/facebook.apk（命令行切目录运行兜底）。
+        candidates.append(Path.cwd() / FACEBOOK_APK_RELATIVE_PATH)
+        # 候选 5：源码运行路径（项目根目录）下的 apks/facebook.apk。
+        candidates.append(Path(__file__).resolve().parents[2] / FACEBOOK_APK_RELATIVE_PATH)
+        # 逐个候选检查文件是否存在。
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        # 全部候选失效时，抛出明确错误，便于用户定位。
+        raise FileNotFoundError(
+            "未找到 facebook.apk（期望外置在可执行文件同级 apks 目录），请确认文件存在："
+            + " / ".join(str(path) for path in candidates)
+        )
+
+    def _resolve_yosemite_apk_path(self) -> Path:
+        """解析 Yosemite.apk 路径，兼容源码运行与打包运行。"""
+        # 保存候选路径，按优先级依次尝试。
+        candidates: list[Path] = []
+        # 优先使用 airtest 包当前安装目录，避免写死 Python 版本路径。
+        try:
+            # 延迟导入 airtest，避免启动阶段不必要依赖。
+            import airtest
+
+            # 解析 airtest 包目录。
+            airtest_root = Path(str(getattr(airtest, "__file__", ""))).resolve().parent
+            # 拼接 Yosemite.apk 绝对路径。
+            candidates.append(airtest_root / "core" / "android" / "static" / "apks" / "Yosemite.apk")
+        except Exception:
+            # 导入失败不阻断流程，继续尝试其他候选路径。
+            log.warning("导入 airtest 失败，继续尝试其他 Yosemite.apk 路径")
+        # 源码运行兜底路径：项目内 .venv/site-packages/airtest/.../Yosemite.apk。
+        candidates.append(
+            Path(__file__).resolve().parents[2]
+            / ".venv"
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+            / YOSEMITE_APK_RELATIVE_PATH
+        )
+        # 打包运行路径：PyInstaller 解包目录下 airtest/.../Yosemite.apk。
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(str(meipass)) / YOSEMITE_APK_RELATIVE_PATH)
+        # 逐个候选检查文件是否存在。
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        # 全部候选失效时，抛出明确错误，便于用户定位。
+        raise FileNotFoundError(
+            "未找到 Yosemite.apk，请确认文件存在："
+            + " / ".join(str(path) for path in candidates)
+        )
+
+    @staticmethod
+    def _compact_adb_output(result: subprocess.CompletedProcess[str]) -> str:
+        """压缩 adb 命令输出为单行文本，便于提示与日志展示。"""
+        # 合并 stdout 与 stderr。
+        merged = f"{str(result.stdout or '').strip()} {str(result.stderr or '').strip()}".strip()
+        # 压成单行，避免 GUI 提示换行过长。
+        return " ".join(merged.split())
+
+    def _is_package_installed_for_device(self, serial: str, package_name: str, timeout_sec: float = 12.0) -> bool:
+        """根据包名判断设备上是否已安装应用。"""
+        # 执行包路径查询命令（已安装时会返回 package:xxx.apk）。
+        try:
+            result = self._run_adb_for_serial(
+                serial=serial,
+                args=["shell", "pm", "path", package_name],
+                timeout_sec=timeout_sec,
+            )
+        except Exception as exc:
+            # 查询失败时记录日志并按“未安装”处理，避免阻塞主流程。
+            log.warning("查询包安装状态失败，按未安装处理", serial=serial, package_name=package_name, error=str(exc))
+            return False
+        # 压缩输出文本便于规则判断。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 package: 视为已安装。
+        if "package:" in output_lower:
+            return True
+        # 常见未安装关键词，直接判定未安装。
+        if "not found" in output_lower or "unknown package" in output_lower:
+            return False
+        # 兜底日志：便于追踪非常见系统输出。
+        log.info(
+            "包安装状态判定为未安装",
+            serial=serial,
+            package_name=package_name,
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return False
+
+    def _is_worker_running(self, serial: str) -> bool:
+        """判断指定设备 worker 是否仍在运行。"""
+        # 先清理一次已退出 worker，避免使用陈旧句柄误判。
+        self._cleanup_dead(serial)
+        # 读取设备对应 worker 句柄。
+        worker = self._workers.get(serial)
+        # 无句柄时判定未运行。
+        if not worker:
+            return False
+        # 返回进程存活状态。
+        return bool(worker.process.is_alive())
+
+    def uninstall_facebook_for_device(self, serial: str) -> str:
+        """卸载指定设备上的 Facebook 应用。"""
+        # 设备正在执行任务时，拒绝卸载以避免和 worker 争用设备。
+        if self._is_worker_running(serial):
+            return f"{serial}: 设备任务运行中，请先停止该设备后再执行一键删除FB"
+        # 先尝试停止 Facebook 进程，降低卸载失败概率。
+        try:
+            self._run_adb_for_serial(serial=serial, args=["shell", "am", "force-stop", FACEBOOK_PACKAGE_NAME], timeout_sec=8.0)
+        except Exception:
+            log.warning("卸载前停止 Facebook 进程失败，继续执行卸载", serial=serial)
+        # 执行卸载命令。
+        try:
+            result = self._run_adb_for_serial(serial=serial, args=["uninstall", FACEBOOK_PACKAGE_NAME], timeout_sec=35.0)
+        except Exception as exc:
+            log.exception("卸载 Facebook 执行异常", serial=serial, error=str(exc))
+            return f"{serial}: 卸载失败（执行异常）{exc}"
+        # 解析命令输出。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 success 时判定成功。
+        if "success" in output_lower:
+            log.info("Facebook 卸载成功", serial=serial, output=output_text)
+            return f"{serial}: Facebook 卸载成功"
+        # 未安装场景按可接受结果返回。
+        if "unknown package" in output_lower or "not installed" in output_lower:
+            log.info("Facebook 未安装，按成功处理", serial=serial, output=output_text)
+            return f"{serial}: Facebook 未安装"
+        # 非 success 视为失败并返回简化原因。
+        log.error(
+            "Facebook 卸载失败",
+            serial=serial,
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return f"{serial}: Facebook 卸载失败（{output_text or f'returncode={result.returncode}'})"
+
+    def install_facebook_for_device(self, serial: str) -> str:
+        """为指定设备安装 Facebook（外置 apks/facebook.apk）。"""
+        # 设备正在执行任务时，拒绝安装以避免和 worker 争用设备。
+        if self._is_worker_running(serial):
+            return f"{serial}: 设备任务运行中，请先停止该设备后再执行一键安装FB"
+        # 解析安装包路径，支持源码和打包运行。
+        try:
+            apk_path = self._resolve_facebook_apk_path()
+        except Exception as exc:
+            log.exception("解析 Facebook 安装包路径失败", serial=serial, error=str(exc))
+            return f"{serial}: 安装失败（找不到 facebook.apk）"
+        # 执行安装命令（-r 覆盖安装，-d 允许降级）。
+        try:
+            result = self._run_adb_for_serial(
+                serial=serial,
+                args=["install", "-r", "-d", str(apk_path)],
+                timeout_sec=200.0,
+            )
+        except Exception as exc:
+            log.exception("安装 Facebook 执行异常", serial=serial, apk_path=str(apk_path), error=str(exc))
+            return f"{serial}: 安装失败（执行异常）{exc}"
+        # 解析命令输出。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 success 时判定成功。
+        if "success" in output_lower:
+            log.info("Facebook 安装成功", serial=serial, apk_path=str(apk_path), output=output_text)
+            return f"{serial}: Facebook 安装成功"
+        # 非 success 视为失败并返回简化原因。
+        log.error(
+            "Facebook 安装失败",
+            serial=serial,
+            apk_path=str(apk_path),
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return f"{serial}: Facebook 安装失败（{output_text or f'returncode={result.returncode}'})"
+
+    def uninstall_facebook_all(self) -> list[str]:
+        """一键卸载全部在线设备上的 Facebook。"""
+        # 读取在线设备列表。
+        serials = self.list_online_devices()
+        # 无在线设备时返回友好提示。
+        if not serials:
+            return ["未检测到在线设备（adb devices 为空）"]
+        # 逐台执行卸载并汇总结果。
+        return [self.uninstall_facebook_for_device(serial) for serial in serials]
+
+    def install_facebook_all(self) -> list[str]:
+        """一键安装全部在线设备上的 Facebook。"""
+        # 读取在线设备列表。
+        serials = self.list_online_devices()
+        # 无在线设备时返回友好提示。
+        if not serials:
+            return ["未检测到在线设备（adb devices 为空）"]
+        # 逐台执行安装并汇总结果。
+        return [self.install_facebook_for_device(serial) for serial in serials]
+
+    def install_yosemite_for_device(self, serial: str) -> str:
+        """为指定设备安装 Yosemite 输入法（手动设为默认）。"""
+        # 先按包名判断是否已安装，已安装则直接跳过。
+        if self._is_package_installed_for_device(serial=serial, package_name=YOSEMITE_PACKAGE_NAME):
+            return f"{serial}: 输入法已安装，跳过（{YOSEMITE_PACKAGE_NAME}）"
+        # 设备正在执行任务时，拒绝安装以避免和 worker 争用设备。
+        if self._is_worker_running(serial):
+            return f"{serial}: 设备任务运行中，请先停止该设备后再执行安装输入法"
+        # 解析安装包路径，支持源码和打包运行。
+        try:
+            apk_path = self._resolve_yosemite_apk_path()
+        except Exception as exc:
+            log.exception("解析 Yosemite 安装包路径失败", serial=serial, error=str(exc))
+            return f"{serial}: 安装失败（找不到 Yosemite.apk）"
+        # 执行安装命令（-r 覆盖安装，-d 允许降级）。
+        try:
+            result = self._run_adb_for_serial(
+                serial=serial,
+                args=["install", "-r", "-d", str(apk_path)],
+                timeout_sec=200.0,
+            )
+        except Exception as exc:
+            log.exception("安装 Yosemite 输入法执行异常", serial=serial, apk_path=str(apk_path), error=str(exc))
+            return f"{serial}: 输入法安装失败（执行异常）{exc}"
+        # 解析命令输出。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 success 时判定成功。
+        if "success" in output_lower:
+            log.info(
+                "Yosemite 输入法安装成功",
+                serial=serial,
+                apk_path=str(apk_path),
+                package_name=YOSEMITE_PACKAGE_NAME,
+                output=output_text,
+            )
+            return f"{serial}: 输入法安装成功（请手动设为默认）"
+        # 非 success 视为失败并返回简化原因。
+        log.error(
+            "Yosemite 输入法安装失败",
+            serial=serial,
+            apk_path=str(apk_path),
+            package_name=YOSEMITE_PACKAGE_NAME,
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return f"{serial}: 输入法安装失败（{output_text or f'returncode={result.returncode}'})"
+
+    def install_yosemite_all(self) -> list[str]:
+        """一键安装全部在线设备上的 Yosemite 输入法。"""
+        # 读取在线设备列表。
+        serials = self.list_online_devices()
+        # 无在线设备时返回友好提示。
+        if not serials:
+            return ["未检测到在线设备（adb devices 为空）"]
+        # 逐台执行安装并汇总结果。
+        return [self.install_yosemite_for_device(serial) for serial in serials]
 
     def _update_state(self, serial: str, state: str, detail: str, event_time: float) -> None:
         # 把事件同步到内存中的 worker 状态。

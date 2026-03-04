@@ -104,6 +104,8 @@ class OpenSettingsTask:
         self.user_db = UserDB()
         # 初始化 Facebook 失败原因缓存，失败时会写入 t_user.msg。
         self.facebook_error_reason = ""
+        # 初始化“本轮是否检测到设备连接异常”标记，默认未检测到。
+        self._runtime_disconnect_detected = False
 
     # 定义“读取抹机王轮次配置”的方法。
     def _read_mojiwang_loop_count(self) -> int:
@@ -173,6 +175,9 @@ class OpenSettingsTask:
             "connection refused",
             "max retries exceeded",
             "failed to establish a new connection",
+            "broken pipe",
+            "connection aborted",
+            "remote end closed connection",
             "device not found",
             "adb: device",
             "adberror",
@@ -205,15 +210,21 @@ class OpenSettingsTask:
             return False
 
     # 定义“统一处理安全动作异常”的方法。
-    def _handle_safe_action_exception(self, action: str, desc: str, exc: Exception) -> None:
+    def _handle_safe_action_exception(self, action: str, desc: str, exc: Exception) -> bool:
         # 先记录原始异常堆栈，便于定位真实报错点。
         self.log.exception("动作执行异常，按失败处理", action=action, target=desc, error=str(exc))
         # 如果识别到 Poco/ADB 连接异常，则尝试自动重建连接。
         if self._is_poco_disconnect_error(exc):
+            # 标记本轮检测到设备连接异常，供 run_once 收尾阶段跳过 status=3 回写。
+            self._runtime_disconnect_detected = True
             # 记录连接异常告警日志。
             self.log.warning("检测到 Poco/ADB 连接异常，尝试重建连接", action=action, target=desc)
             # 执行重建，不论成功失败都不再抛异常。
-            self._try_recover_poco(reason=f"{action}:{desc}")
+            recovered = self._try_recover_poco(reason=f"{action}:{desc}")
+            # 返回重建结果，供调用方决定是否重试当前步骤。
+            return bool(recovered)
+        # 非连接异常返回 False，表示不执行重试。
+        return False
 
     def clear_all(self) -> None:
         # 这个方法目前没用到，但保留作为“如果需要在循环外做一次性清理”的预留。
@@ -261,7 +272,30 @@ class OpenSettingsTask:
         # 捕获异常并按失败处理，保证流程不会崩溃。
         except Exception as exc:
             # 统一记录异常并尝试恢复连接。
-            self._handle_safe_action_exception("wait_and_click", desc, exc)
+            recovered = self._handle_safe_action_exception("wait_and_click", desc, exc)
+            # 仅在连接重建成功时，对当前失败步骤再重试一次。
+            if recovered:
+                # 记录重试日志，便于排查“重建后是否恢复”。
+                self.log.warning("连接重建后重试步骤", action="wait_and_click", target=desc)
+                try:
+                    # 重建后再次等待并判断节点是否存在。
+                    if node.wait(self.mojiwang_wait_timeout_sec).exists():
+                        # 重建后节点出现则点击。
+                        node.click()
+                        # 记录重试点击成功日志。
+                        self.log.info("连接重建后点击成功", target=desc)
+                        # 返回 True 表示重试成功。
+                        return True
+                    # 重建后仍未命中时记录错误日志。
+                    self.log.error("连接重建后等待超时，未点击", target=desc, timeout_sec=self.mojiwang_wait_timeout_sec)
+                    # 返回 False 表示重试失败。
+                    return False
+                # 捕获重试中的二次异常并继续兜底。
+                except Exception as retry_exc:
+                    # 记录二次异常并尝试再次恢复（不再重复重试步骤）。
+                    self._handle_safe_action_exception("wait_and_click_retry", desc, retry_exc)
+                    # 返回 False 表示重试失败。
+                    return False
             # 返回 False 表示本次动作失败。
             return False
 
@@ -278,7 +312,25 @@ class OpenSettingsTask:
         # 任意异常都在这里兜底，避免流程直接崩溃。
         except Exception as exc:
             # 统一记录异常并尝试恢复连接。
-            self._handle_safe_action_exception("wait_exists", desc, exc)
+            recovered = self._handle_safe_action_exception("wait_exists", desc, exc)
+            # 仅在连接重建成功时，对当前查找步骤再重试一次。
+            if recovered:
+                # 记录重试日志，便于后续定位。
+                self.log.warning("连接重建后重试步骤", action="wait_exists", target=desc, wait_seconds=wait_seconds)
+                try:
+                    # 重建后再次执行等待并判断存在。
+                    bools = bool(node.wait(wait_seconds).exists())
+                    # 重试仍未命中时记录错误日志。
+                    if not bools:
+                        self.log.error("连接重建后查找失败", target=desc, wait_seconds=wait_seconds)
+                    # 返回重试结果。
+                    return bools
+                # 捕获重试中的二次异常并继续兜底。
+                except Exception as retry_exc:
+                    # 记录二次异常并尝试恢复（不再重复重试步骤）。
+                    self._handle_safe_action_exception("wait_exists_retry", desc, retry_exc)
+                    # 返回 False 表示重试失败。
+                    return False
             # 发生异常时按不存在处理，让主流程安全退出。
             return False
 
@@ -295,7 +347,24 @@ class OpenSettingsTask:
         # 任意点击异常都在这里兜底。
         except Exception as exc:
             # 统一记录异常并尝试恢复连接。
-            self._handle_safe_action_exception("click", desc, exc)
+            recovered = self._handle_safe_action_exception("click", desc, exc)
+            # 仅在连接重建成功时，对当前点击步骤再重试一次。
+            if recovered:
+                # 记录重试日志，便于后续排查。
+                self.log.warning("连接重建后重试步骤", action="click", target=desc)
+                try:
+                    # 重建后再次执行点击动作。
+                    node.click(sleep_interval=sleep_interval)
+                    # 记录重试点击成功日志。
+                    self.log.info("连接重建后点击成功", target=desc, sleep_interval=sleep_interval)
+                    # 返回 True 表示重试成功。
+                    return True
+                # 捕获重试中的二次异常并继续兜底。
+                except Exception as retry_exc:
+                    # 记录二次异常并尝试恢复（不再重复重试步骤）。
+                    self._handle_safe_action_exception("click_retry", desc, retry_exc)
+                    # 返回 False 表示重试失败。
+                    return False
             # 返回 False 表示点击失败。
             return False
     def _safe_wait_click(self, node: Any, wait_seconds: float, desc: str,sleep_interval: float | None = None ) -> bool:
@@ -336,7 +405,7 @@ class OpenSettingsTask:
         return False
 
     # 定义“处理 Facebook 干扰弹框”的方法。
-    def _handle_facebook_blocking_popups(self, poco: Any) -> bool:
+    def  _handle_facebook_blocking_popups(self, poco: Any) -> bool:
         # 标记是否至少点击过一个干扰弹框。
         clicked_any_popup = False
         # 组合常见系统权限弹框候选节点（跨 ROM 兼容）。
@@ -347,9 +416,12 @@ class OpenSettingsTask:
             (poco("android:id/button1"), "Facebook-干扰弹框-系统确认按钮"),
             # 旧版 packageinstaller 权限允许按钮。
             (poco("com.android.packageinstaller:id/permission_allow_button"), "Facebook-干扰弹框-旧版权限允许按钮"),
+            (poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]),"刷新按钮也查找v333"),
+            (poco(text=FACEBOOK_POPUP_IGNORE_BUTTON[self.device_lang]),"刷新按钮也查找v333"),
+
         ]
         # 连续扫描多轮，兼容“一个弹框点完又弹下一个”的场景。
-        for round_index in range(3):
+        for round_index in range(5):
             # 标记当前轮是否有命中弹框。
             clicked_in_round = False
             # 逐个尝试点击候选弹框。
@@ -403,7 +475,15 @@ class OpenSettingsTask:
         return self._facebook_fail(fail_reason)
 
     # 定义“安全动作失败时按步骤重试并统一返回”的方法。
+
     def _facebook_action_or_fail(
+        # 当前逻辑是：
+        #
+        # 1. 先执行原步骤一次（第一次尝试） 位置：open_settings.py:420
+        # 2. 第一次失败后进入重试分支 _facebook_retry_step_after_popup(...) 位置：open_settings.py:430
+        # 3. 在重试分支里，先处理弹框 _handle_facebook_blocking_popups(...) 位置：open_settings.py:393
+        # 4. 只有处理到弹框后，才重试失败步骤 retry_action() 位置：open_settings.py:399
+
         self,
         poco: Any,
         step_desc: str,
@@ -1274,10 +1354,12 @@ class OpenSettingsTask:
 
 
         # 继续向当前焦点输入 last name（不依赖节点）。
+        # 1993 到 1998 随机数
+        year_num = random.randint(1993, 1998)
         if not _run_step_or_fail(
             step_desc="输入年份",
             fail_reason="年份输入失败",
-            action=lambda: self._safe_input_on_focused("1996", "年份", True),
+            action=lambda: self._safe_input_on_focused(str(year_num), "年份", True),
         ):
             # 步骤失败且重试后仍失败时，直接结束当前流程。
             return False
@@ -1403,43 +1485,6 @@ class OpenSettingsTask:
         # 初始化验证码缓存变量，供不同分支共用。
         cached_fb_code: str | None = None
 
-        # 这里判断是否注册了了
-        # match_reg_node = poco(textMatches=FACEBOOK_IS_REGISTERED_BUTTON[self.device_lang])
-        # if  self._safe_wait_exists(match_reg_node, 5, "已注册按钮"):
-        #     self._safe_click(match_reg_node, "已注册按钮", sleep_interval=3)
-        #
-        #     # 继续邮箱登录
-        #     if not self._safe_wait_exists(poco(FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON[self.device_lang]), 5, "选择邮箱登录按钮"):
-        #         return
-        #
-        #     self._safe_click(poco(FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON[self.device_lang]), "选择邮箱登录按钮", sleep_interval=2)
-        #
-        #     # 已注册的聚焦验证码
-        #     if not self._safe_wait_exists(poco(FACEBOOK_FOCUS_EMAIL_CODE_INPUT[self.device_lang]), 15, "验证码输入框-已注册"):
-        #         return
-        #
-        #     self._safe_click(poco(FACEBOOK_FOCUS_EMAIL_CODE_INPUT[self.device_lang]), "验证码输入框-已注册-点击聚焦", sleep_interval=2)
-        #
-        #     # 在已注册分支先拉取验证码，后续步骤可直接复用。
-        #     cached_fb_code = self._fetch_facebook_code()
-        #     # 拉取失败时结束当前流程。
-        #     if not cached_fb_code:
-        #         return
-        #
-        #
-        #     if not self._safe_input_on_focused(cached_fb_code, "输入 fb code-注册的",False):
-        #     # 输入失败时结束流程，避免误操作。
-        #         return
-        #
-        #     sleep(1)
-        #     # 继续邮箱登录
-        #     if not self._safe_wait_exists(poco(FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON[self.device_lang]), 5, "继续选择邮箱登录按钮V2"):
-        #         return
-        #
-        #     self._safe_click(poco(FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON[self.device_lang]), "继续选择邮箱登录按钮V2", sleep_interval=2)
-        #     return
-
-
 
 
 
@@ -1533,51 +1578,68 @@ class OpenSettingsTask:
 
 
 
-
     # 定义“Facebook 头像相册随机选图”的方法。
     def facebook_select_img(self) -> bool:
         # 获取当前任务实例中的 Poco 对象。
         poco = self._require_poco()
         # 用 try/except 保护整个选图流程，确保异常可追踪。
+        # 初始化“前置弹框是否命中”的标记。
+        tmp_bool = False
         try:
 
-            # 接受所有 cookie
+            # 先尝试处理“稍后”弹框，命中即点击，未命中不影响主流程。
+            self.poco_find_or_click(
+                nodes=[poco(text=FACEBOOK_LATER_BUTTON[self.device_lang])],
+                desc="稍后按钮0",
+                sleep_interval=2,
+            )
+            # 预先定位“接受 cookie”按钮节点。
             cookie_button = poco(text=FACEBOOK_ACCEPT_ALL_COOKIE_BUTTON[self.device_lang])
-            if self._safe_wait_exists(cookie_button, 5, "接受 cookie 按钮"):
-                self._safe_click(cookie_button, "接受 cookie 按钮", sleep_interval=5)
-
+            # 预先定位系统权限允许按钮节点。
             allow_button = poco("com.android.permissioncontroller:id/permission_allow_button")
-
-            # 安全等待权限按钮。
-            if self._safe_wait_exists(allow_button, 2, "系统权限允许按钮v3"):
-                # 点击权限按钮后等待 1 秒。
-                self._safe_click(allow_button, "系统权限允许按钮v3", sleep_interval=2)
+            # 合并查找并点击前置弹框（cookie/权限），兼容连续弹出多个弹框。
+            for round_index in range(3):
+                # 每轮命中任一候选就点击。
+                if not self.poco_find_or_click(
+                    nodes=[cookie_button, allow_button],
+                    desc=f"头像流程前置弹框候选-{round_index}",
+                    sleep_interval=2,
+                ):
+                    # 当前轮无命中时结束循环。
+                    break
+                # 记录当前流程命中过前置弹框。
+                tmp_bool = True
 
             menu_tab_node = poco(desc=FACEBOOK_MENU_TAB_DESC[self.device_lang])
             if not self._safe_wait_exists(menu_tab_node,5,"三条杆菜单"):
                 # 返回失败并记录具体错误原因。
-                # return self._facebook_fail("未找到 Facebook 三条杆菜单入口")
+                if not tmp_bool:
+                    return self._facebook_fail("未找到 Facebook 三条杆菜单入口")
                 return True
 
             self._safe_click(menu_tab_node, "三条杆菜单", sleep_interval=5)
-
+            tmp_bool = True
             # 查找头像
             avatar_node = poco(FACEBOOK_PROFILE_PHOTO_BUTTON[self.device_lang])
             if not self._safe_wait_exists(avatar_node, 5, "首页头像按钮"):
                 # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到首页头像按钮")
+                self._facebook_fail("未找到首页头像按钮")
+                return True
 
             self._safe_click(avatar_node, "首页头像按钮", sleep_interval=3)
 
-            # 这里可能弹出忽略按钮和添加 photo 按钮
+            # 这里可能弹出忽略按钮 和开始按钮
 
             # 初始化“是否已通过弹框直接进入相册页面”的标记。
             opened_album_directly = False
             # 定位“添加图片”弹框按钮节点。
-            facebook_add_photo_popup_node = poco(text=FACEBOOK_ADD_PHOTO_POPUP[self.device_lang])
+            facebook_add_photo_popup_node = poco(text=FACEBOOK_ADD_PHOTO_POPUP[self.device_lang],)
             # 如果弹框按钮出现，则点击后直接进入相册授权流程。
-            if self._safe_wait_exists(facebook_add_photo_popup_node, 5, "弹框跳转添加图片"):
-                self._safe_click(facebook_add_photo_popup_node, "弹框跳转添加图片", sleep_interval=2)
+            if self.poco_find_or_click(
+                nodes=[facebook_add_photo_popup_node,poco(text=FACEBOOK_START_UP[self.device_lang])],
+                desc="弹框跳转添加图片",
+                sleep_interval=5,
+            ):
                 # 标记当前已通过弹框进入相册。
                 opened_album_directly = True
                 # 记录直达分支日志，方便后续排查页面分支。
@@ -1585,18 +1647,20 @@ class OpenSettingsTask:
 
             # 如果没有命中弹框直达，则走常规头像二级入口流程。
             if not opened_album_directly:
-                # 判断有没有忽略，有就排除
-                facebook_ignore_button_node = poco(text=FACEBOOK_IGNORE_BUTTON[self.device_lang])
-                if self._safe_wait_exists(facebook_ignore_button_node, 3, "头像入口忽略按钮"):
-                    # 返回记录
-                    pass
+                # 先合并查找一次头像入口忽略按钮（命中即点击，未命中直接继续）。
+                self.poco_find_or_click(
+                    nodes=[poco(text=FACEBOOK_IGNORE_BUTTON[self.device_lang])],
+                    desc="头像入口忽略按钮",
+                    sleep_interval=3,
+                )
 
                 # 定位头像二级入口节点。
                 avatar_nodev2 = poco(FACEBOOK_PROFILE_PHOTO_BUTTON_2[self.device_lang])
                 # 等待头像二级入口出现。
                 if not self._safe_wait_exists(avatar_nodev2, 5, "首页头像按钮v2"):
                     # 返回失败并记录具体错误原因。
-                    return self._facebook_fail("未找到首页头像按钮v2")
+                    self._facebook_fail("未找到首页头像按钮v2")
+                    return True
 
                 # 点击头像二级入口。
                 self._safe_click(avatar_nodev2, "首页头像按钮v2", sleep_interval=3)
@@ -1606,23 +1670,34 @@ class OpenSettingsTask:
                 # 等待打开底部相册按钮出现。
                 if not self._safe_wait_exists(facebook_profile_photo_bottom_node, 5, "打开底部相册找不到"):
                     # 返回失败并记录具体错误原因。
-                    return self._facebook_fail("未找到打开底部相册按钮")
+                    self._facebook_fail("未找到打开底部相册按钮")
+                    return True
 
                 # 点击打开底部相册按钮。
                 self._safe_click(facebook_profile_photo_bottom_node, "点击首页头像按钮", sleep_interval=2)
+            else:
+                self.poco_find_or_click(
+                    nodes=[poco(text=FACEBOOK_PROFILE_PHOTO_BUTTON_3[self.device_lang])],
+                    desc="头像入按钮",
+                    sleep_interval=3,
+                )
 
+            # 预先定位“相册授权”按钮。
             facebook_album_auth_button_node = poco(text=FACEBOOK_ALBUM_AUTH_BUTTON[self.device_lang])
-            if self._safe_wait_exists(facebook_album_auth_button_node, 5, "相册权限授权按钮"):
-                self._safe_click(facebook_album_auth_button_node, "相册权限授权按钮", sleep_interval=2)
-
-            if self._safe_wait_exists(poco("android:id/button1"), 3, "系统弹框允许按钮"):
-                self._safe_click(poco("android:id/button1"), "系统弹框允许按钮", sleep_interval=2)
-
+            # 预先定位“系统确认”按钮。
+            system_confirm_button_node = poco("android:id/button1")
+            # 预先定位“系统权限允许”按钮。
             allow_button = poco("com.android.permissioncontroller:id/permission_allow_button")
-            # 安全等待权限按钮。
-            if self._safe_wait_exists(allow_button, 2, "系统权限允许按钮v3"):
-            # 点击权限按钮后等待 1 秒。
-                self._safe_click(allow_button, "系统权限允许按钮v3", sleep_interval=2)
+            # 合并查找授权相关弹层，命中即点击，最多处理 4 轮。
+            for round_index in range(4):
+                # 每轮命中任一候选就点击。
+                if not self.poco_find_or_click(
+                    nodes=[facebook_album_auth_button_node, system_confirm_button_node, allow_button],
+                    desc=f"相册授权弹层候选-{round_index}",
+                    sleep_interval=2,
+                ):
+                    # 当前轮无命中时结束循环。
+                    break
 
             # 查找 Facebook 图库页面内的 GridView 节点。
             grid_nodes = poco("com.facebook.katana:id/(name removed)").offspring("android.widget.GridView")
@@ -1631,7 +1706,8 @@ class OpenSettingsTask:
                 # 记录节点缺失，便于排查页面结构变化。
                 self.log.error("未找到 Facebook 图库 GridView 节点")
                 # 返回失败并记录具体错误原因。
-                return self._facebook_fail("未找到 Facebook 图库 GridView 节点")
+                self._facebook_fail("未找到 Facebook 图库 GridView 节点")
+                return True
             # 取第一个 GridView 作为图片列表容器。
             grid_view = grid_nodes[0]
             # 读取 GridView 的全部直接子节点。
@@ -1645,7 +1721,8 @@ class OpenSettingsTask:
                 # 记录错误信息，说明只有索引 0 这个非图片节点。
                 self.log.error("当前 GridView 中除了索引 0 以外没有照片可供选择", total_items=total_items)
                 # 返回失败并记录具体错误原因。
-                return self._facebook_fail(f"图库可选照片不足：total_items={total_items}")
+                self._facebook_fail(f"图库可选照片不足：total_items={total_items}")
+                return True
             # 计算真实图片数量（排除索引 0）。
             photo_count = total_items - 1
             # 计算最大可随机索引（最多为 9）。
@@ -1664,14 +1741,18 @@ class OpenSettingsTask:
             # 优先直接点击随机命中的图片节点。
             if not self._safe_click(target_item, f"Facebook 随机图片节点-索引{random_index}", sleep_interval=1):
                 # 返回失败并记录具体错误原因。
-                return self._facebook_fail(f"点击随机图片失败：index={random_index}")
+                self._facebook_fail(f"点击随机图片失败：index={random_index}")
+                return True
 
 
             self.log.info("Facebook 随机图片点击完成", random_index=random_index)
 
-            facebook_confirm_photo_button_node = poco(FACEBOOK_CONFIRM_PHOTO_BUTTON[self.device_lang])
-            if  self._safe_wait_exists(facebook_confirm_photo_button_node, 5, "注册确认相片"):
-                self._safe_click(facebook_confirm_photo_button_node, "注册确认相片", sleep_interval=2)
+            # 尝试点击“注册确认相片”按钮，命中即点击，未命中则继续返回成功。
+            self.poco_find_or_click(
+                nodes=[poco(FACEBOOK_CONFIRM_PHOTO_BUTTON[self.device_lang])],
+                desc="注册确认相片",
+                sleep_interval=2,
+            )
 
             # 返回 True 表示选图成功。
             return True
@@ -1687,6 +1768,8 @@ class OpenSettingsTask:
     def run_once(self) -> None:
         # 重置本轮 Facebook 失败原因缓存。
         self._reset_facebook_error_reason()
+        # 重置本轮设备连接异常标记，避免串到下一轮任务。
+        self._runtime_disconnect_detected = False
         # 初始化 Facebook 成功标记，默认失败。
         facebook_ok = False
         # 标记本轮是否需要把异常继续抛出给 worker 做运行时重建。
@@ -1730,6 +1813,8 @@ class OpenSettingsTask:
             facebook_ok = False
             # 连接类异常让 worker 触发 reinit_runtime，避免任务层吞错后带病继续。
             if self._is_poco_disconnect_error(exc) or isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError, OSError)):
+                # 标记本轮检测到设备连接异常，供收尾阶段跳过 status=3。
+                self._runtime_disconnect_detected = True
                 # 记录将要升级处理的异常类型。
                 self.log.warning("检测到运行时连接异常，准备抛给 worker 进行重建", error_type=type(exc).__name__)
                 # 打开继续抛出标记。
@@ -1744,14 +1829,24 @@ class OpenSettingsTask:
                 self._update_fb_result_to_db(success=True, reason="")
             # Facebook 失败时写入 status=3, fb_status=0, msg=具体错误原因。
             else:
-                # 组装最终失败原因（优先使用流程内记录的具体原因）。
-                final_reason = str(self.facebook_error_reason or "").strip()
-                # 失败原因为空时给出统一兜底文案。
-                if final_reason == "":
-                    # 使用兜底失败原因，避免 msg 为空。
-                    final_reason = "Facebook 注册失败：流程未完成，未命中成功条件"
-                # 回写失败状态和详细错误原因。
-                self._update_fb_result_to_db(success=False, reason=final_reason)
+                # 设备连接异常场景下，不把账号打成 status=3，避免误判账号问题。
+                if self._runtime_disconnect_detected:
+                    # 记录跳过失败落库日志，便于后续排查。
+                    self.log.warning(
+                        "检测到设备连接异常，跳过账号失败状态回写",
+                        user_email=self.user_email,
+                        reason=str(self.facebook_error_reason or "").strip(),
+                    )
+                # 非连接异常仍按原逻辑写入失败状态。
+                else:
+                    # 组装最终失败原因（优先使用流程内记录的具体原因）。
+                    final_reason = str(self.facebook_error_reason or "").strip()
+                    # 失败原因为空时给出统一兜底文案。
+                    if final_reason == "":
+                        # 使用兜底失败原因，避免 msg 为空。
+                        final_reason = "Facebook 注册失败：流程未完成，未命中成功条件"
+                    # 回写失败状态和详细错误原因。
+                    self._update_fb_result_to_db(success=False, reason=final_reason)
             # 关闭任务内数据库连接，避免每轮 run_once 产生连接堆积。
             try:
                 # 主动关闭当前任务实例持有的 UserDB 连接。
@@ -1761,9 +1856,18 @@ class OpenSettingsTask:
                 # 记录关闭异常，便于后续排查。
                 self.log.exception("关闭任务内 user_db 失败", error=str(exc))
             # 非连接类异常时保留尾部等待；连接类异常由 worker 立即接管恢复。
-            if not should_reraise:
+            if (not should_reraise) and (not self._runtime_disconnect_detected):
                 # 任务尾部等待 30 秒，给外部观察或下轮衔接留时间。
                 sleep(30)
+        # 连接类异常在任务收尾后继续抛出给 worker，触发统一恢复流程。
+        # 当流程未成功且本轮检测到设备连接异常，但没有显式异常抛出时，也主动抛给 worker 做重建。
+        if (not facebook_ok) and self._runtime_disconnect_detected and not should_reraise:
+            # 打开继续抛出标记，触发 worker 侧 reinit_runtime。
+            should_reraise = True
+            # 构造可重试的连接异常对象，确保 worker 立即走重建分支。
+            reraised_exc = ConnectionResetError(
+                "TransportDisconnected: 检测到设备连接异常，已跳过 status=3 回写并请求 worker 重建运行时"
+            )
         # 连接类异常在任务收尾后继续抛出给 worker，触发统一恢复流程。
         if should_reraise and reraised_exc is not None:
             # 继续抛出原始异常，保留完整类型和错误上下文。

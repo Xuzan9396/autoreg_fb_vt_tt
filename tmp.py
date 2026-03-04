@@ -71,11 +71,37 @@ poco = AndroidUiautomationPoco(use_airtest_input=True, screenshot_each_action=Fa
 poco(textMatches="Oui, me connecter en tant.*").click()
 
 
+poco(desc="Retour").click()
+poco(desc="Retour").click()
+poco("Retour").click()
+poco("Retour").click()
+poco("android:id/button1").click()
 
-poco("Continuer").click()
+poco("Photo de profil").click()
 
 
-poco("android:id/content").child("com.facebook.katana:id/(name removed)").child("com.facebook.katana:id/(name removed)").child("android.widget.FrameLayout").child("android.widget.FrameLayout").child("android.widget.FrameLayout")[1].child("android.widget.FrameLayout")[1].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").offspring("androidx.recyclerview.widget.RecyclerView")[0].child("android.view.ViewGroup")[1].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup")[0].click()
+
+
+poco("Autoriser l’accès").click()
+
+poco("android:id/button1").click()
+
+
+poco("com.android.permissioncontroller:id/permission_allow_button").click()
+
+poco(desc="Retour").click()
+poco(desc="Retour").click()
+poco(desc="Accueil, onglet 1 sur 5").click()
+poco(desc="Accueil, onglet 1 sur 5").click()
+poco(desc="Menu, onglet 5 sur 5").click()
+poco("votre photo de profil").click()
+
+poco("Ajouter une photo de profil").click()
+
+
+
+
+
 
 
 

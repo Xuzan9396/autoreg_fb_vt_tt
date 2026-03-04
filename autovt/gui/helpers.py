@@ -12,7 +12,8 @@ import flet as ft
 
 LOGIN_USERNAME = "admin"
 LOGIN_PASSWORD = "123456"
-DEVICE_MONITOR_INTERVAL_SEC = 2.0
+# 设备列表自动监控刷新间隔（秒），调大到 5 秒降低 adb 轮询压力。
+DEVICE_MONITOR_INTERVAL_SEC = 5.0
 # 账号列表每页条数（固定 20，和需求保持一致）。
 ACCOUNT_PAGE_SIZE = 20
 MOJIWANG_RUN_NUM_KEY = "mojiwang_run_num"

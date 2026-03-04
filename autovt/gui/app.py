@@ -8,6 +8,7 @@ import os
 import platform
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -36,7 +37,8 @@ class AutoVTGuiApp:
 
         # ── 后端服务 ──
         self.manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
-        self.user_db = UserDB()
+        # GUI 连接使用短超时，避免被 worker 写锁长时间阻塞导致界面卡顿。
+        self.user_db = UserDB(connect_timeout_sec=1.2, busy_timeout_ms=1200)
         self.user_db.connect()
 
         # ── 子模块 ──
@@ -274,13 +276,23 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _run_action(self, action_name: str, fn: Callable[[], str | list[str]]) -> None:
+        # 记录动作总起点时间，用于输出总耗时。
+        action_started_at = time.monotonic()
         # 先记一条开始日志，便于确认按钮点击事件已触发。
         log.info("收到 GUI 动作请求", action=action_name)
         # 初始化动作结果文案，后续统一用于提示条展示。
         message_text = ""
+        # 初始化动作函数执行耗时（毫秒）。
+        fn_elapsed_ms = 0
+        # 初始化动作后刷新耗时（毫秒）。
+        refresh_elapsed_ms = 0
         try:
+            # 记录动作函数执行起点。
+            fn_started_at = time.monotonic()
             # 执行具体动作函数（如 start_all / stop_all / start_worker 等）。
             result = fn()
+            # 计算动作函数执行耗时。
+            fn_elapsed_ms = int((time.monotonic() - fn_started_at) * 1000)
             # 列表返回值场景（批量动作）。
             if isinstance(result, list):
                 # 拼接批量动作返回消息。
@@ -290,22 +302,52 @@ class AutoVTGuiApp:
                 # 直接构造单条动作提示文案。
                 message_text = f"{action_name}: {result}"
             # 记录动作成功日志。
-            log.info("GUI 动作执行完成", action=action_name, message=message_text)
+            log.info("GUI 动作执行完成", action=action_name, message=message_text, fn_elapsed_ms=fn_elapsed_ms)
         except Exception as exc:
             # 记录异常堆栈，便于定位失败原因。
-            log.exception("执行动作失败", action=action_name)
+            log.exception("执行动作失败", action=action_name, fn_elapsed_ms=fn_elapsed_ms)
             # 失败场景下也要给出可读反馈文案。
             message_text = f"{action_name} 失败: {exc}"
         # 尝试展示提示条（内部已做异常兜底）。
         self._show_snack(message_text)
         try:
+            # 记录动作后刷新设备区起点。
+            refresh_started_at = time.monotonic()
             # 动作后立即刷新设备区，避免用户等待轮询才看到状态变化。
             self.device_tab.refresh(source="action", show_toast=False)
             # 提交页面更新，保证刷新结果尽快可见。
             self.page.update()
+            # 计算动作后刷新耗时。
+            refresh_elapsed_ms = int((time.monotonic() - refresh_started_at) * 1000)
+            # 刷新耗时较长时打告警日志，便于定位卡顿。
+            if refresh_elapsed_ms >= 1200:
+                log.warning("动作后刷新设备区耗时较长", action=action_name, refresh_elapsed_ms=refresh_elapsed_ms)
+            # 刷新耗时正常时打调试日志。
+            else:
+                log.debug("动作后刷新设备区完成", action=action_name, refresh_elapsed_ms=refresh_elapsed_ms)
         except Exception:
             # 刷新失败不影响主流程，仅记录日志排查。
-            log.exception("动作后刷新设备区失败", action=action_name)
+            log.exception("动作后刷新设备区失败", action=action_name, refresh_elapsed_ms=refresh_elapsed_ms)
+        # 计算动作总耗时（包含动作执行、提示条与刷新触发）。
+        total_elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
+        # 总耗时超过阈值时记录告警，便于后续定位卡住点。
+        if total_elapsed_ms >= 1500:
+            log.warning(
+                "GUI 动作总耗时较长",
+                action=action_name,
+                total_elapsed_ms=total_elapsed_ms,
+                fn_elapsed_ms=fn_elapsed_ms,
+                refresh_elapsed_ms=refresh_elapsed_ms,
+            )
+        # 总耗时正常时记录调试日志。
+        else:
+            log.debug(
+                "GUI 动作总耗时完成",
+                action=action_name,
+                total_elapsed_ms=total_elapsed_ms,
+                fn_elapsed_ms=fn_elapsed_ms,
+                refresh_elapsed_ms=refresh_elapsed_ms,
+            )
 
     def _show_snack(self, message: str) -> None:
         # 尝试展示提示条；异常时只记日志，不再把异常抛回按钮事件。
@@ -328,6 +370,9 @@ class AutoVTGuiApp:
         while self._monitor_running:
             await asyncio.sleep(DEVICE_MONITOR_INTERVAL_SEC)
             if not self._logged_in:
+                continue
+            # 当前不在“设备列表”页时跳过自动刷新，避免后台日志扫描影响账号筛选流畅度。
+            if self._current_tab_index != 0:
                 continue
             self.device_tab.refresh(source="auto", show_toast=False)
 

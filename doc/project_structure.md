@@ -9,6 +9,8 @@ autovt/
 ├── .github/
 │   └── workflows/
 │       └── flet-macos-tag.yml
+├── apks/
+│   └── facebook.apk
 ├── autovt/
 │   ├── __init__.py
 │   ├── adb.py
@@ -49,13 +51,13 @@ autovt/
 ## 模块职责
 
 - `main.py`：主入口（默认 GUI），支持 `--mode cli` 回退命令行模式。
-- `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）。
+- `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）；设备列表支持 Facebook 安装/卸载批量操作（顶部“`一键删除FB` / `一键安装FB`”）和单设备操作（卡片“`删除FB` / `安装FB`”），包名固定 `com.facebook.katana`，安装包固定外置目录 `apks/facebook.apk`（与 `.exe/.app` 同级）；同时支持 Yosemite 输入法安装（顶部“`一键安装输入法`”与卡片“`安装输入法`”）；GUI 使用短超时 SQLite 连接（`connect_timeout=1.2s`、`busy_timeout=1200ms`）降低 worker 并发写入时的页面阻塞风险。
 - `autovt/gui/account_importer.py`：账号批量导入逻辑模块（文本文件读取、全量格式校验、国家化 Faker 姓名生成、跳过已存在邮箱、批量写入 `t_user`）。
 - `autovt/auth/login_service.py`：登录服务模块；对齐 Go 版登录协议（AES-GCM + `/bit_login`），并提供本地账号密码缓存（下次启动自动回填）。
 - `autovt/gui/__init__.py`：GUI 包导出入口（`run_gui`）。
 - `autovt/cli.py`：命令行交互层（用于 `--mode cli` 回退场景）。
 - `autovt/logs.py`：统一日志初始化（终端+文件 JSON、日志级别、第三方 debug 开关）。
-- `autovt/multiproc/manager.py`：主进程生命周期管理。
+- `autovt/multiproc/manager.py`：主进程生命周期管理；新增 Facebook 批量安装/卸载能力（`install_facebook_all()` / `uninstall_facebook_all()`），通过 ADB 对所有在线设备执行安装包 `apks/facebook.apk` 的安装或包名 `com.facebook.katana` 的卸载；新增 Yosemite 输入法安装能力（`install_yosemite_all()` / `install_yosemite_for_device()`），安装前会基于包名 `com.netease.nie.yosemite` 先判定是否已安装，已安装则直接跳过。
 - `autovt/multiproc/worker.py`：单设备子进程执行循环。
 - `autovt/runtime.py`：子进程内 Airtest/Poco 初始化，并维护“进程内 Poco 单例”（`create_poco()` / `get_poco()`）；`setup_device()` 会把解析出的 `adb_path` 注入设备 URI，避免被外部常驻 adb 进程劫持，并记录 `auto_setup/create_poco` 耗时日志。
 - `autovt/adb.py`：ADB 设备发现和设备 URI 组装（默认优先项目内置 `adb/mac` 与 `adb/windows`，并支持 `AUTOVT_ADB_BIN` 覆盖，兼容打包后 PATH 缺失场景）；`build_device_uri()` 支持传入 `adb_path` 强制 Airtest 走指定 adb；`list_online_serials()` 已增加 `adb devices` 超时与 `kill-server/start-server` 自愈，避免 adb 冲突导致 GUI 卡住。
@@ -63,10 +65,10 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；任务结束会主动关闭任务内 `UserDB` 连接；若命中连接类异常（如 `BrokenPipeError`），会在回写数据库后继续抛给 worker，触发 `reinit_runtime()` 做完整重建。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当检测到设备连接异常时会跳过 `status=3/fb_status=0` 失败回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；任务结束会主动关闭任务内 `UserDB` 连接。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
-- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
+- `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；不再把 `apks/facebook.apk` 打进可执行文件，改为在发布 zip 中与 `.exe/.app` 同级提供外置 `apks/` 目录；仍会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
 
 其中 ADB 相关关键项：
 - `ADB_SERVER_ADDR`：ADB Server 地址（如 `127.0.0.1:5037`）。

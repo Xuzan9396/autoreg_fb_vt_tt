@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import deque
@@ -20,6 +21,10 @@ log = get_logger("gui.device")
 DEVICE_LOG_MAX_LINES = 100
 # 每个日志文件最多回读 200 行，兼顾性能和“最新”准确度。
 DEVICE_LOG_TAIL_PER_FILE = 200
+# 自动刷新时日志读取最小间隔（秒），避免每轮都扫磁盘导致卡顿。
+DEVICE_LOG_AUTO_REFRESH_MIN_INTERVAL_SEC = 12.0
+# 每轮最多扫描最近 N 个日志文件，避免历史文件过多时读取过慢。
+DEVICE_LOG_SCAN_MAX_FILES = 6
 # 仅展示 task.open_settings 组件日志（按 component 字段过滤）。
 OPEN_SETTINGS_COMPONENT_TOKENS = (
     # 当前 compact 文本中的常规输出格式。
@@ -48,6 +53,10 @@ class DeviceTab:
         self._last_online_serials: set[str] = set()
         # 缓存当前日志框的最新消息列表，供“一键复制”直接使用。
         self._latest_log_messages: list[str] = []
+        # 缓存最近一次“解析后日志记录”（时间, 消息），用于自动刷新节流复用。
+        self._cached_log_records: list[tuple[str, str]] = []
+        # 记录最近一次日志读取时间（monotonic 秒）。
+        self._last_log_load_mono_ts: float = 0.0
         # 是否跟随最新日志到底部；用户手动上滑后会临时关闭。
         self._logs_follow_latest = True
 
@@ -105,14 +114,40 @@ class DeviceTab:
         # 构建设备页时先加载一次日志，避免初次进入为空白。
         self._refresh_logs_view()
 
-        top_actions = ft.ResponsiveRow(
+        # 顶部操作区改为可换行 Row，按钮按内容宽度展示，避免被网格拉得过长。
+        top_actions = ft.Row(
             controls=[
-                ft.FilledButton("刷新设备", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True), col={"xs": 12, "sm": 6, "md": 2}),
-                ft.FilledButton("启动全部", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self._run_action("启动全部", self.manager.start_all), col={"xs": 12, "sm": 6, "md": 2}),
-                ft.FilledButton("停止全部", icon=ft.Icons.STOP, on_click=lambda e: self._run_action("停止全部", self.manager.stop_all), col={"xs": 12, "sm": 6, "md": 2}),
-                ft.FilledButton("暂停全部", icon=ft.Icons.PAUSE, on_click=lambda e: self._run_action("暂停全部", lambda: self.manager.send_command_all("pause")), col={"xs": 12, "sm": 6, "md": 3}),
-                ft.FilledButton("恢复全部", icon=ft.Icons.PLAY_CIRCLE_FILL, on_click=lambda e: self._run_action("恢复全部", lambda: self.manager.send_command_all("resume")), col={"xs": 12, "sm": 6, "md": 3}),
+                # 刷新设备按钮（按内容宽度显示）。
+                ft.FilledButton("刷新设备", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
+                # 启动全部按钮（按内容宽度显示）。
+                ft.FilledButton("启动全部", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self._run_action("启动全部", self.manager.start_all)),
+                # 停止全部按钮（按内容宽度显示）。
+                ft.FilledButton("停止全部", icon=ft.Icons.STOP, on_click=lambda e: self._run_action("停止全部", self.manager.stop_all)),
+                # 暂停全部按钮（按内容宽度显示）。
+                ft.FilledButton("暂停全部", icon=ft.Icons.PAUSE, on_click=lambda e: self._run_action("暂停全部", lambda: self.manager.send_command_all("pause"))),
+                # 恢复全部按钮（按内容宽度显示）。
+                ft.FilledButton("恢复全部", icon=ft.Icons.PLAY_CIRCLE_FILL, on_click=lambda e: self._run_action("恢复全部", lambda: self.manager.send_command_all("resume"))),
+                # 新增“一键卸载 Facebook”按钮，作用于全部在线设备。
+                ft.FilledButton(
+                    "一键删除FB",
+                    icon=ft.Icons.DELETE,
+                    on_click=lambda e: self._run_action("一键删除FB", self.manager.uninstall_facebook_all),
+                ),
+                # 新增“一键安装 Facebook”按钮，使用 apks/facebook.apk 安装到全部在线设备。
+                ft.FilledButton(
+                    "一键安装FB",
+                    icon=ft.Icons.DOWNLOAD,
+                    on_click=lambda e: self._run_action("一键安装FB", self.manager.install_facebook_all),
+                ),
+                # 新增“一键安装输入法”按钮，安装 Yosemite.apk（手动设默认）。
+                ft.FilledButton(
+                    "一键安装输入法",
+                    icon=ft.Icons.KEYBOARD,
+                    on_click=lambda e: self._run_action("一键安装输入法", self.manager.install_yosemite_all),
+                ),
             ],
+            # 允许按钮在宽度不足时自动换行。
+            wrap=True,
             spacing=8,
             run_spacing=8,
         )
@@ -247,43 +282,194 @@ class DeviceTab:
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新设备列表和进程状态。"""
+        # 已有刷新任务在执行时直接跳过，避免并发刷新导致界面抖动。
         if self._refreshing:
             return
+        # 设备列表容器未初始化时直接返回。
         if not self.device_list_column:
             return
 
+        # 先置位刷新中标记，防止短时间重复触发 run_task。
         self._refreshing = True
         try:
-            online_serials = set(self.manager.list_online_devices())
+            # 把刷新任务调度到异步协程，避免在按钮事件里长时间阻塞。
+            self.page.run_task(self._refresh_async, source, show_toast)
+        except Exception:
+            # 调度失败时立即复位刷新标记，避免后续刷新被永久跳过。
+            self._refreshing = False
+            # 记录调度异常，便于定位 Flet 运行时问题。
+            log.exception("调度设备刷新任务失败", source=source)
+
+    async def _refresh_async(self, source: str, show_toast: bool) -> None:
+        """异步刷新设备列表，耗时 IO 放到后台线程执行。"""
+        # 记录刷新开始时间，用于输出耗时诊断日志。
+        started_at = time.monotonic()
+        # 初始化各阶段耗时，默认值为 0（毫秒）。
+        adb_elapsed_ms = 0
+        # 初始化日志读取阶段耗时（毫秒）。
+        log_read_elapsed_ms = 0
+        # 初始化状态查询阶段耗时（毫秒）。
+        status_elapsed_ms = 0
+        # 初始化模型组装阶段耗时（毫秒）。
+        model_build_elapsed_ms = 0
+        # 初始化渲染提交阶段耗时（毫秒）。
+        render_elapsed_ms = 0
+        try:
+            # 定义“后台读取在线设备 + 统计耗时”的小方法。
+            async def _load_online_with_timing() -> tuple[set[str], int]:
+                # 记录读取在线设备起点。
+                online_started_at = time.monotonic()
+                # 在线程池读取在线设备，避免阻塞 UI 事件循环。
+                online_values = set(await asyncio.to_thread(self.manager.list_online_devices))
+                # 返回结果和耗时毫秒。
+                return online_values, int((time.monotonic() - online_started_at) * 1000)
+
+            # 定义“后台读取日志 + 统计耗时”的小方法。
+            async def _load_logs_with_timing() -> tuple[list[tuple[str, str]], int]:
+                # 记录日志读取起点。
+                logs_started_at = time.monotonic()
+                # 在线程池读取日志，避免阻塞 UI 事件循环。
+                records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
+                # 返回日志记录和耗时毫秒。
+                return records, int((time.monotonic() - logs_started_at) * 1000)
+
+            # 默认标记“本轮需要重新读取日志”。
+            need_reload_logs = True
+            # 仅自动刷新场景做日志读取节流，减少磁盘扫描压力。
+            if source == "auto":
+                # 读取当前单调时钟秒数。
+                now_mono = time.monotonic()
+                # 距离上次日志读取未超过阈值时，复用缓存日志。
+                if now_mono - self._last_log_load_mono_ts < DEVICE_LOG_AUTO_REFRESH_MIN_INTERVAL_SEC:
+                    # 标记本轮跳过日志重读。
+                    need_reload_logs = False
+
+            # 需要重读日志时并行执行“adb 在线设备读取”和“日志读取”。
+            if need_reload_logs:
+                # 并行启动两个后台任务，降低总等待时间。
+                online_task = _load_online_with_timing()
+                # 并行启动日志读取任务。
+                logs_task = _load_logs_with_timing()
+                # 等待两项任务同时完成。
+                (online_serials, adb_elapsed_ms), (log_records, log_read_elapsed_ms) = await asyncio.gather(online_task, logs_task)
+                # 更新日志缓存，供后续自动刷新复用。
+                self._cached_log_records = list(log_records)
+                # 记录本次日志读取时间。
+                self._last_log_load_mono_ts = time.monotonic()
+            # 不需要重读日志时，只读取在线设备，日志直接走缓存。
+            else:
+                # 仅执行在线设备读取，减少自动刷新耗时。
+                online_serials, adb_elapsed_ms = await _load_online_with_timing()
+                # 复用缓存日志记录，避免重复扫盘。
+                log_records = list(self._cached_log_records)
+                # 复用缓存场景记 0ms，表示未实际读取磁盘。
+                log_read_elapsed_ms = 0
+
+            # 记录状态查询阶段起点。
+            step_started_at = time.monotonic()
+            # 状态读取保持在主线程，避免跨线程访问 manager.user_db 连接。
             status_rows = self.manager.status()
+            # 计算状态查询阶段耗时。
+            status_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+
+            # 记录模型组装阶段起点。
+            step_started_at = time.monotonic()
+            # 把状态行按 serial 建成索引表，便于后续快速合并。
             status_map = {str(row["serial"]): row for row in status_rows}
+            # 合并在线设备与已有 worker 状态，保证离线但仍在跑的进程可见。
             merged_serials = sorted(online_serials | set(status_map.keys()))
+            # 准备最终渲染给 UI 的设备模型列表。
             rows: list[DeviceViewModel] = []
 
+            # 遍历合并后的 serial，组装展示模型。
             for serial in merged_serials:
+                # 读取当前设备对应的状态行（可能为空）。
                 row = status_map.get(serial, {})
+                # 追加一条设备展示模型。
                 rows.append(
                     DeviceViewModel(
+                        # 设备序列号。
                         serial=serial,
+                        # 是否在线（来自 adb devices）。
                         online=serial in online_serials,
+                        # worker 进程 pid。
                         pid=int(row.get("pid", -1)),
+                        # worker 存活标记。
                         alive=str(row.get("alive", "no")),
+                        # worker 状态（running/paused/waiting...）。
                         state=str(row.get("state", "idle")),
+                        # worker 详情文案。
                         detail=str(row.get("detail", "未启动")),
+                        # 当前设备占用邮箱。
                         email_account=str(row.get("email_account", "")).strip(),
+                        # 最近状态更新时间戳。
                         updated_at=float(row.get("updated_at", 0.0)),
                     )
                 )
+            # 计算模型组装阶段耗时。
+            model_build_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
 
+            # 记录渲染提交阶段起点。
+            step_started_at = time.monotonic()
+            # 渲染设备卡片列表。
             self._render_rows(rows)
-            self._refresh_logs_view()
+            # 渲染日志列表（使用后台线程已读取好的数据）。
+            self._render_logs_records(log_records)
+            # 更新顶部统计摘要。
             self._update_summary(rows, online_serials)
+            # 根据刷新来源决定是否提示设备变化。
             self._notify_changes(source=source, now_online=online_serials, show_toast=show_toast)
+            # 提交页面更新，确保控件变化立刻生效。
             self.page.update()
+            # 计算渲染提交阶段耗时。
+            render_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 计算本次刷新总耗时（毫秒）。
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            # 耗时超过阈值时打告警日志，便于定位卡顿源头。
+            if elapsed_ms >= 1500:
+                log.warning(
+                    "设备页刷新耗时较长",
+                    source=source,
+                    elapsed_ms=elapsed_ms,
+                    adb_elapsed_ms=adb_elapsed_ms,
+                    log_read_elapsed_ms=log_read_elapsed_ms,
+                    status_elapsed_ms=status_elapsed_ms,
+                    model_build_elapsed_ms=model_build_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                    online_count=len(online_serials),
+                    status_count=len(status_rows),
+                    log_count=len(log_records),
+                )
+            # 正常耗时记录调试日志，便于后续对比。
+            else:
+                log.debug(
+                    "设备页刷新完成",
+                    source=source,
+                    elapsed_ms=elapsed_ms,
+                    adb_elapsed_ms=adb_elapsed_ms,
+                    log_read_elapsed_ms=log_read_elapsed_ms,
+                    status_elapsed_ms=status_elapsed_ms,
+                    model_build_elapsed_ms=model_build_elapsed_ms,
+                    render_elapsed_ms=render_elapsed_ms,
+                    online_count=len(online_serials),
+                    status_count=len(status_rows),
+                    log_count=len(log_records),
+                )
         except Exception as exc:
-            log.exception("刷新设备列表失败", source=source)
+            # 记录完整堆栈，便于排查刷新失败原因。
+            log.exception(
+                "刷新设备列表失败",
+                source=source,
+                adb_elapsed_ms=adb_elapsed_ms,
+                log_read_elapsed_ms=log_read_elapsed_ms,
+                status_elapsed_ms=status_elapsed_ms,
+                model_build_elapsed_ms=model_build_elapsed_ms,
+                render_elapsed_ms=render_elapsed_ms,
+            )
+            # 给用户一个可读错误提示。
             self._show_snack(f"刷新失败: {exc}")
         finally:
+            # 无论成功失败都要复位刷新标记，避免后续无法再次刷新。
             self._refreshing = False
 
     # ── 内部方法 ─────────────────────────────────────────────────────────
@@ -303,14 +489,40 @@ class DeviceTab:
         state_label = state_text(item.state)
         updated_text = time.strftime("%H:%M:%S", time.localtime(item.updated_at)) if item.updated_at > 0 else "-"
 
-        action_row = ft.ResponsiveRow(
+        # 单设备操作区改为可换行 Row，按钮按内容宽度展示，避免拉伸过长。
+        action_row = ft.Row(
             controls=[
-                ft.OutlinedButton("启动", icon=ft.Icons.PLAY_ARROW, on_click=lambda e, s=item.serial: self._run_action(f"{s} 启动", lambda: self.manager.start_worker(s)), col={"xs": 6, "sm": 3, "md": 2}),
-                ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=lambda e, s=item.serial: self._run_action(f"{s} 停止", lambda: self.manager.stop_worker(s)), col={"xs": 6, "sm": 3, "md": 2}),
-                ft.OutlinedButton("暂停", icon=ft.Icons.PAUSE, on_click=lambda e, s=item.serial: self._run_action(f"{s} 暂停", lambda: self.manager.send_command(s, "pause")), col={"xs": 6, "sm": 3, "md": 2}),
-                ft.OutlinedButton("恢复", icon=ft.Icons.PLAY_CIRCLE_FILL, on_click=lambda e, s=item.serial: self._run_action(f"{s} 恢复", lambda: self.manager.send_command(s, "resume")), col={"xs": 6, "sm": 3, "md": 2}),
-                ft.OutlinedButton("重启", icon=ft.Icons.RESTART_ALT, on_click=lambda e, s=item.serial: self._run_action(f"{s} 重启", lambda: self.manager.restart_worker(s)), col={"xs": 12, "sm": 6, "md": 2}),
+                # 启动按钮（按内容宽度显示）。
+                ft.OutlinedButton("启动", icon=ft.Icons.PLAY_ARROW, on_click=lambda e, s=item.serial: self._run_action(f"{s} 启动", lambda: self.manager.start_worker(s))),
+                # 停止按钮（按内容宽度显示）。
+                ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=lambda e, s=item.serial: self._run_action(f"{s} 停止", lambda: self.manager.stop_worker(s))),
+                # 暂停按钮（按内容宽度显示）。
+                ft.OutlinedButton("暂停", icon=ft.Icons.PAUSE, on_click=lambda e, s=item.serial: self._run_action(f"{s} 暂停", lambda: self.manager.send_command(s, "pause"))),
+                # 恢复按钮（按内容宽度显示）。
+                ft.OutlinedButton("恢复", icon=ft.Icons.PLAY_CIRCLE_FILL, on_click=lambda e, s=item.serial: self._run_action(f"{s} 恢复", lambda: self.manager.send_command(s, "resume"))),
+                # 重启按钮（按内容宽度显示）。
+                ft.OutlinedButton("重启", icon=ft.Icons.RESTART_ALT, on_click=lambda e, s=item.serial: self._run_action(f"{s} 重启", lambda: self.manager.restart_worker(s))),
+                # 单设备删除 Facebook 按钮。
+                ft.OutlinedButton(
+                    "删除FB",
+                    icon=ft.Icons.DELETE,
+                    on_click=lambda e, s=item.serial: self._run_action(f"{s} 删除FB", lambda: self.manager.uninstall_facebook_for_device(s)),
+                ),
+                # 单设备安装 Facebook 按钮。
+                ft.OutlinedButton(
+                    "安装FB",
+                    icon=ft.Icons.DOWNLOAD,
+                    on_click=lambda e, s=item.serial: self._run_action(f"{s} 安装FB", lambda: self.manager.install_facebook_for_device(s)),
+                ),
+                # 单设备安装 Yosemite 输入法按钮（安装后手动设默认）。
+                ft.OutlinedButton(
+                    "安装输入法",
+                    icon=ft.Icons.KEYBOARD,
+                    on_click=lambda e, s=item.serial: self._run_action(f"{s} 安装输入法", lambda: self.manager.install_yosemite_for_device(s)),
+                ),
             ],
+            # 允许按钮在宽度不足时自动换行。
+            wrap=True,
             spacing=6,
             run_spacing=6,
         )
@@ -466,8 +678,30 @@ class DeviceTab:
         entries: list[tuple[str, str, str]] = []
         # 非标准行排序回退计数器。
         fallback_index = 0
-        # 遍历日志目录内所有 jsonl 文件。
-        for path in sorted(log_dir.glob("*.jsonl")):
+        # 收集日志目录内所有 jsonl 文件并按“最近修改时间倒序”排序。
+        all_paths: list[Path] = []
+        # 定义“安全读取文件修改时间”方法，避免日志轮转删除时抛异常。
+        def _safe_mtime(path: Path) -> float:
+            # 使用异常保护 stat 调用。
+            try:
+                # 返回文件最近修改时间戳。
+                return float(path.stat().st_mtime)
+            # 读取失败时回退 0，保证排序稳定。
+            except Exception:
+                return 0.0
+        # 遍历日志目录内的 jsonl 文件。
+        for path in log_dir.glob("*.jsonl"):
+            # 仅保留普通文件。
+            if path.is_file():
+                # 追加到候选列表。
+                all_paths.append(path)
+        # 按文件最近修改时间倒序排序，优先读取最新文件。
+        all_paths.sort(key=_safe_mtime, reverse=True)
+        # 仅取最近 N 个文件，避免历史日志过多导致每轮扫描过慢。
+        selected_paths = all_paths[:DEVICE_LOG_SCAN_MAX_FILES]
+
+        # 遍历选中的日志文件列表。
+        for path in selected_paths:
             # 只处理普通文件，跳过目录或软链接异常项。
             if not path.is_file():
                 continue
@@ -512,6 +746,14 @@ class DeviceTab:
             return
         # 读取最新日志时间+消息列表。
         records = self._load_latest_log_messages(limit=DEVICE_LOG_MAX_LINES)
+        # 渲染日志记录到日志面板。
+        self._render_logs_records(records)
+
+    def _render_logs_records(self, records: list[tuple[str, str]]) -> None:
+        """把日志记录渲染到日志面板。"""
+        # 日志容器尚未初始化时直接返回。
+        if not self.log_list_column:
+            return
         # 缓存可复制文本（带时间）。
         self._latest_log_messages = [f"{display_time} | {message}" for display_time, message in records]
         # 更新日志头部元信息。

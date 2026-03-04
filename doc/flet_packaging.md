@@ -79,9 +79,10 @@ uv run --with flet==0.80.5 flet pack main.py -n AutoVT -i assets/icon.icns --yes
 1. `--add-data "assets:assets"`：把运行时图标与静态资源一并打进包。
 2. `--add-data "images:images"`：把业务模板图资源一并打进包。
 3. `--add-data "adb/mac:adb/mac"`（mac）/`--add-data "adb/windows;adb/windows"`（windows）：仅打包当前平台 adb，减小体积并避免混入另一平台二进制。
-4. `--add-data "${POCO_ANDROID_DIR}:poco/drivers/android"`：打包 Poco Android 整目录资源（包含 `pocoservice-debug.apk`，并覆盖后续新增资源）。
-5. `--add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android"`：打包 Airtest Android 整目录资源（包含 `Yosemite.apk`、`*.jar`、`stf_libs/*.so` 等依赖）。
-6. `--yes`：自动确认覆盖提示，适合 CI。
+4. `facebook.apk` 采用外置目录加载：解压后请保持 `apks/facebook.apk` 与 `.exe/.app` 同级，不再通过 `--add-data` 打进可执行文件。
+5. `--add-data "${POCO_ANDROID_DIR}:poco/drivers/android"`：打包 Poco Android 整目录资源（包含 `pocoservice-debug.apk`，并覆盖后续新增资源）。
+6. `--add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android"`：打包 Airtest Android 整目录资源（包含 `Yosemite.apk`、`*.jar`、`stf_libs/*.so` 等依赖）。
+7. `--yes`：自动确认覆盖提示，适合 CI。
 
 产物一般在：
 

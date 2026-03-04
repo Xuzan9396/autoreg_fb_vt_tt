@@ -125,8 +125,18 @@ jobs:
             find dist -maxdepth 4 -print || true
             exit 1
           fi
+          STAGE_DIR="dist-release/${APP_NAME}-macos-arm64-${GITHUB_REF_NAME}"
+          rm -rf "${STAGE_DIR}"
+          mkdir -p "${STAGE_DIR}"
+          cp -R "${APP_PATH}" "${STAGE_DIR}/${APP_NAME}.app"
+          if [ -d "apks" ]; then
+            cp -R "apks" "${STAGE_DIR}/apks"
+            echo "已包含外置 apks 目录到发布包"
+          else
+            echo "未检测到 apks 目录，发布包仅包含应用本体"
+          fi
           ZIP_FILE="dist-release/${APP_NAME}-macos-arm64-${GITHUB_REF_NAME}.zip"
-          ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ZIP_FILE}"
+          ditto -c -k --sequesterRsrc --keepParent "${STAGE_DIR}" "${ZIP_FILE}"
           shasum -a 256 "${ZIP_FILE}" | tee "${ZIP_FILE}.sha256"
 
       # 上传 macOS 构建产物。
@@ -289,9 +299,30 @@ jobs:
             Get-ChildItem -Recurse dist -ErrorAction SilentlyContinue | Select-Object FullName, Length
             throw "Windows 产物缺失"
           }
+          $stageDir = "dist-release/$env:APP_NAME-windows-x64-$env:GITHUB_REF_NAME"
+          if (Test-Path $stageDir) {
+            Remove-Item $stageDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item -Path $exePath -Destination (Join-Path $stageDir "$env:APP_NAME.exe") -Force
+          # 默认仅打包 exe，后续按目录存在性可选追加 apks。
+          $archivePaths = @("$env:APP_NAME.exe")
+          if (Test-Path "apks") {
+            Copy-Item -Path "apks" -Destination (Join-Path $stageDir "apks") -Recurse -Force
+            $archivePaths += "apks"
+            Write-Host "已包含外置 apks 目录到发布包"
+          } else {
+            Write-Host "未检测到 apks 目录，发布包仅包含 exe"
+          }
 
           $zipPath = "dist-release/$env:APP_NAME-windows-x64-$env:GITHUB_REF_NAME.zip"
-          Compress-Archive -Path $exePath -DestinationPath $zipPath -Force
+          Push-Location $stageDir
+          try {
+            $zipTarget = Join-Path -Path (Resolve-Path "..").Path -ChildPath (Split-Path $zipPath -Leaf)
+            Compress-Archive -Path $archivePaths -DestinationPath $zipTarget -Force
+          } finally {
+            Pop-Location
+          }
 
           $sha = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLower()
           "$sha  $(Split-Path $zipPath -Leaf)" | Out-File "$zipPath.sha256" -Encoding ascii
@@ -354,11 +385,11 @@ jobs:
 
             ### macOS ARM64
             - 下载 `AutoVT-macos-arm64-<tag>.zip`
-            - 解压后得到 `AutoVT.app`
+            - 解压后得到 `AutoVT.app` 与 `apks/`（必须保持同级）
 
             ### Windows x64
             - 下载 `AutoVT-windows-x64-<tag>.zip`
-            - 解压后得到 `AutoVT.exe`
+            - 解压后得到 `AutoVT.exe` 与 `apks/`（必须保持同级）
 
             ### 说明
             - 首次打开若出现安全提示，请在系统设置里允许运行。

@@ -1,6 +1,6 @@
 # autovt
 
-git tag -a v1.0.9 -m "修改" &&  git push origin v1.0.9
+git tag -a v1.1.0 -m "修改" &&  git push origin v1.1.0
 
 uv run python main.py
 uv run python test.py facebook_run_all
@@ -30,8 +30,8 @@ uv run python main.py
 
 - 顶部 3 个 Tab：`设备列表` / `账号列表` / `全局设置`
 - 默认打开 `设备列表` Tab，并展示 `adb devices` 在线设备
-- `设备列表`：`刷新设备`、`启动全部`、`停止全部`、`暂停全部`、`恢复全部`
-- `设备列表`：每台设备独立操作 `启动` / `停止` / `暂停` / `恢复` / `重启`
+- `设备列表`：`刷新设备`、`启动全部`、`停止全部`、`暂停全部`、`恢复全部`、`一键删除FB`、`一键安装FB`
+- `设备列表`：每台设备独立操作 `启动` / `停止` / `暂停` / `恢复` / `重启` / `删除FB` / `安装FB`
 - `设备列表`：状态列表展示 `online`、`pid`、`alive`、`state`、`detail`
 - `设备列表`：底部日志框只展示 `self.log = get_logger("task.open_settings")` 输出日志（`component=task.open_settings`），最新 100 条，黑底白字并自动滚动到最新
 - `设备列表`：日志支持鼠标拖选复制，并提供“清空日志/复制日志”按钮（清空仅删除 `task.open_settings` 日志）
@@ -98,6 +98,8 @@ uv run \
   --add-data "${AIRTEST_ANDROID_DIR}:airtest/core/android" \
   --yes -v
 ```
+
+说明：`facebook.apk` 不再打入可执行文件，请把安装包放在运行程序同级目录 `apks/facebook.apk`。
 
 打包产物：
 
