@@ -65,9 +65,9 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并先执行 `setup_device() + create_poco()` 重建整套运行时；若当前步骤重试后仍是连接异常，则立即抛给 worker 执行 `reinit_runtime()`，避免脚本带着失效的触控/输入通道继续往下跑；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当检测到设备连接异常时会跳过 `status=3/fb_status=0` 失败回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；支持 `fb_delete_num` 配置（`0=仅清理`、`>0` 且 `worker_loop_seq % fb_delete_num == 0` 时执行卸载+重装），也支持 `setting_fb_del_num` 配置（`0=不清理`、`>0` 且 `worker_loop_seq % setting_fb_del_num == 0` 时执行 `setting_clean_fb()`，自动打开系统设置并循环删除 Facebook 账号）；由 worker 每轮注入 `worker_loop_seq` 到 `TaskContext.extras` 后在任务层判定执行；任务结束会主动关闭任务内 `UserDB` 连接。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并先执行 `setup_device() + create_poco()` 重建整套运行时；若当前步骤重试后仍是连接异常，则立即抛给 worker 执行 `reinit_runtime()`，避免脚本带着失效的触控/输入通道继续往下跑；图片模板点击统一走 `_safe_click_image_template()`，内部支持资源路径解析、`Template(record_pos/resolution)` 透传和 `TargetNotFoundError` 安全兜底，避免可选图片未出现时直接把整轮任务打挂；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当检测到设备连接异常时会跳过 `status=3/fb_status=0` 失败回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；支持 `fb_delete_num` 配置（`0=仅清理`、`>0` 且 `worker_loop_seq % fb_delete_num == 0` 时执行卸载+重装），也支持 `setting_fb_del_num` 配置（`0=不清理`、`>0` 且 `worker_loop_seq % setting_fb_del_num == 0` 时执行 `setting_clean_fb()`，自动打开系统设置并循环删除 Facebook 账号）；由 worker 每轮注入 `worker_loop_seq` 到 `TaskContext.extras` 后在任务层判定执行；任务结束会主动关闭任务内 `UserDB` 连接。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
-- `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
+- `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住；调试时若设备断开，会把 Poco 后台线程的断连堆栈降级成简短提示，并按“调试流程结束”友好退出，减少 `Thread-1` 噪音。
 - `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；不再把 `apks/facebook.apk` 打进可执行文件，改为在发布 zip 中与 `.exe/.app` 同级提供外置 `apks/` 目录；仍会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
 
 其中 ADB 相关关键项：
@@ -317,7 +317,7 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 ## test.py 全局异常兜底
 
 - `test.py` 使用 `run_with_global_guard()` 统一捕获未处理异常，避免脚本直接崩溃。
-- 正常结束返回码为 `0`，异常返回码为 `1`，手动中断（Ctrl+C）返回码为 `130`。
+- 正常结束返回码为 `0`，异常返回码为 `1`，手动中断（Ctrl+C）返回码为 `130`；设备断开这类调试态运行时中断会按友好结束处理，返回码为 `0`。
 - 无论成功或失败都会执行 `cleanup_poco()`，确保 PocoService 和资源得到清理。
 - 默认仅输出简要异常；若需完整堆栈，可临时加 `AUTOVT_SHOW_TRACEBACK=1`。
 

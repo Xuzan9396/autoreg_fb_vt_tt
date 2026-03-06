@@ -35,6 +35,8 @@ from autovt.tasks.open_settings import OpenSettingsTask
 _POCO_CREATED = False
 # 定义 Poco 停止等待超时秒数，避免 stop_running 长时间阻塞退出。
 _POCO_STOP_TIMEOUT_SEC = 5.0
+# 保存原始线程异常钩子，便于非目标异常时继续走默认处理。
+_ORIGINAL_THREADING_EXCEPTHOOK = threading.excepthook
 
 
 # 定义安全打印函数，避免 ASCII 控制台中文报错。
@@ -51,6 +53,48 @@ def safe_print(*args: object) -> None:
         fallback = text.encode("ascii", errors="backslashreplace").decode("ascii")
         # 输出降级后的文本，保证脚本不中断。
         print(fallback)
+
+
+# 定义“判断异常是否属于设备断开/运行时连接中断”的方法。
+def is_disconnect_error(exc: BaseException) -> bool:
+    # 提取异常详情并统一转小写，便于关键字匹配。
+    detail = str(exc or "").strip().lower()
+    # 常见断连关键字命中即视为连接中断。
+    keywords = (
+        "transportdisconnected",
+        "connection refused",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "broken pipe",
+        "device not found",
+        "adb: device",
+        "adberror",
+        "adbshellerror",
+        "remote end closed connection",
+        "connection aborted",
+        "pocoservice",
+        "127.0.0.1",
+    )
+    # 返回是否命中任意断连关键字。
+    return any(keyword in detail for keyword in keywords)
+
+
+# 定义“调试模式线程异常钩子”，屏蔽 Poco 后台线程的断连噪音。
+def debug_threading_excepthook(args: threading.ExceptHookArgs) -> None:
+    # 提取当前线程对象，便于输出线程名。
+    thread_obj = getattr(args, "thread", None)
+    # 提取线程名，缺失时回退 unknown。
+    thread_name = getattr(thread_obj, "name", "unknown")
+    # 提取线程异常对象。
+    exc_value = getattr(args, "exc_value", None)
+    # Poco 后台保活线程在设备断开时常见无意义长堆栈，这里改成简短提示。
+    if exc_value is not None and is_disconnect_error(exc_value):
+        # 输出简短提示，说明这是设备断开导致的后台线程退出，不再打印整段 Traceback。
+        safe_print("检测到后台线程连接已断开，按设备断开处理并忽略线程堆栈。", "thread:", thread_name, "error:", exc_value)
+        # 直接返回，阻止默认线程异常打印。
+        return
+    # 非断连异常仍走 Python 默认线程异常处理，避免吞掉真实 bug。
+    _ORIGINAL_THREADING_EXCEPTHOOK(args)
 
 
 # 定义设备号解析方法，默认自动选择第一台在线设备。
@@ -272,6 +316,8 @@ def cleanup_poco() -> None:
 def main() -> None:
     # 声明要修改模块级变量。
     global _POCO_CREATED
+    # 安装调试专用线程异常钩子，避免 Poco 后台线程在断连时刷整段堆栈。
+    threading.excepthook = debug_threading_excepthook
     # 默认不传参数时执行 run_once（全流程一次）。
     method_name = sys.argv[1] if len(sys.argv) > 1 else "run_once"
     # 自动选择调试设备 serial。
@@ -334,8 +380,15 @@ def run_with_global_guard() -> int:
         safe_print("收到中断信号，程序已安全退出。")
         # 约定返回 130 表示被中断。
         return 130
-    # 捕获所有未处理异常，避免直接抛 Traceback 导致体验差。
+    # 调试场景下，设备断开属于外部运行时中断，改成友好提示退出。
     except Exception as exc:
+        # 设备断开时输出简短提示，不再走“程序异常退出”文案。
+        if is_disconnect_error(exc):
+            # 输出设备断开提示。
+            safe_print("检测到设备连接已断开，调试流程结束。", type(exc).__name__, str(exc))
+            # 返回 0，表示已按预期收尾退出。
+            return 0
+        # 非断连异常继续走原有异常提示链路。
         # 打印异常摘要。
         safe_print("程序异常退出:", type(exc).__name__, str(exc))
         # 读取是否显示详细堆栈的开关。
@@ -356,6 +409,8 @@ def run_with_global_guard() -> int:
     finally:
         # 执行 Poco 资源清理。
         cleanup_poco()
+        # 恢复默认线程异常钩子，避免影响其他脚本。
+        threading.excepthook = _ORIGINAL_THREADING_EXCEPTHOOK
 
 
 # 脚本直接运行时进入这里。

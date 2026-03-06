@@ -325,6 +325,114 @@ class OpenSettingsTask:
             + " / ".join(str(path) for path in candidates)
         )
 
+    # 定义“安全等待并点击图片模板”的方法，避免图片未出现时直接抛异常中断主流程。
+    def _safe_wait_touch_template(
+        self,
+        template: Template,
+        desc: str,
+        timeout_sec: float = 20.0,
+        interval_sec: float = 3.0,
+        optional: bool = True,
+    ) -> bool:
+        # 尝试执行“等待图片出现并点击”的动作。
+        try:
+            # 先等待模板出现，降低直接 exists 的偶发抖动。
+            wait(template, timeout=timeout_sec, interval=interval_sec)
+            # 图片存在时执行点击。
+            if exists(template):
+                # 点击模板对应位置。
+                touch(template)
+                # 记录图片点击成功日志。
+                self.log.info("图片模板点击成功", target=desc, timeout_sec=timeout_sec, interval_sec=interval_sec)
+                # 返回 True 表示点击成功。
+                return True
+            # 等待后仍未命中时记录日志。
+            self.log.warning("图片模板等待结束但未命中", target=desc, timeout_sec=timeout_sec, interval_sec=interval_sec)
+            # 返回 False 表示未命中。
+            return False
+        # 捕获图片等待/点击异常。
+        except Exception as exc:
+            # 连接类异常仍走统一恢复链路，避免把运行时断开误判成普通未命中。
+            if self._is_poco_disconnect_error(exc):
+                # 统一记录异常并尝试恢复连接。
+                recovered = self._handle_safe_action_exception("template_wait_touch", desc, exc)
+                # 恢复失败时直接交给 worker 做整套运行时重建。
+                self._raise_if_disconnect_unrecovered("template_wait_touch", desc, exc, recovered)
+                # 当前图片步骤不在任务层继续重试，按失败返回给调用方。
+                return False
+            # 可选图片未命中时仅记日志，不中断主流程。
+            if optional:
+                # 记录可选图片未命中的日志。
+                self.log.info("可选图片模板未命中，按跳过处理", target=desc, error=str(exc))
+                # 返回 False 表示未命中。
+                return False
+            # 必选图片失败时记录异常日志。
+            self.log.exception("图片模板处理失败", target=desc, error=str(exc))
+            # 返回 False 表示处理失败。
+            return False
+
+    # 定义“根据图片资源路径构建 Template 对象”的方法。
+    def _build_asset_template(
+        self,
+        *relative_parts: str,
+        threshold: float | None = None,
+        target_pos: int = 5,
+        record_pos: tuple[float, float] | None = None,
+        resolution: tuple[int, int] = (),
+        rgb: bool = False,
+    ) -> Template:
+        # 解析图片资源绝对路径，兼容源码运行和打包运行。
+        image_path = self._resolve_image_asset_path(*relative_parts)
+        # 使用源码签名中的原始参数直接构建 Template。
+        return Template(
+            str(image_path),
+            threshold=threshold,
+            target_pos=target_pos,
+            record_pos=record_pos,
+            resolution=resolution,
+            rgb=rgb,
+        )
+
+    # 定义“安全找图并点击”的统一方法，返回 True/False。
+    def _safe_click_image_template(
+        self,
+        desc: str,
+        *relative_parts: str,
+        timeout_sec: float = 20.0,
+        interval_sec: float = 3.0,
+        optional: bool = True,
+        threshold: float | None = None,
+        target_pos: int = 5,
+        record_pos: tuple[float, float] | None = None,
+        resolution: tuple[int, int] = (),
+        rgb: bool = False,
+    ) -> bool:
+        # 使用异常保护整个“解析路径 + 构建模板 + 点击”流程。
+        try:
+            # 构建当前图片资源对应的 Template 对象。
+            template = self._build_asset_template(
+                *relative_parts,
+                threshold=threshold,
+                target_pos=target_pos,
+                record_pos=record_pos,
+                resolution=resolution,
+                rgb=rgb,
+            )
+            # 调用已有安全模板点击方法执行真正的等待和点击。
+            return self._safe_wait_touch_template(
+                template=template,
+                desc=desc,
+                timeout_sec=timeout_sec,
+                interval_sec=interval_sec,
+                optional=optional,
+            )
+        # 模板构建或路径解析失败时记录日志并返回 False。
+        except Exception as exc:
+            # 记录统一图片点击失败日志。
+            self.log.exception("图片资源点击失败", target=desc, error=str(exc))
+            # 返回 False 表示当前图片点击失败。
+            return False
+
     # 定义“安全卸载应用”的方法。
     def _safe_uninstall_app(self, package: str) -> bool:
         # 包名为空时直接按失败处理。
@@ -2768,29 +2876,24 @@ class OpenSettingsTask:
         if not self.poco_find_or_click(
             nodes=[poco(desc=FACEBOOK_MENU_TAB_DESC[self.device_lang]),poco(desc=FACEBOOK_MENU_TAB_USER[self.device_lang])],
             desc="三条杆菜单v2",
-            sleep_interval=15,
+            sleep_interval=5,
         ):
-            try:
-                # 解析打包可用的 user.png 图片路径，作为菜单入口的图片兜底。
-                user_menu_image_path = self._resolve_image_asset_path("images", "fr", "facebook", "user.png")
-                # 基于 user.png 构建 Airtest 模板对象。
-                user_menu_template = Template(str(user_menu_image_path),resolution=(1080, 2340))
-                # 先等待图片出现，降低直接 exists 命中率不稳定的问题。
-                wait(user_menu_template, timeout=20, interval=3)
-                # 图片存在时执行点击。
-                if exists(user_menu_template):
-                    # 点击图片入口进入 Facebook 菜单页。
-                    touch(user_menu_template)
-                    # 记录图片兜底点击成功日志。
-                    self.log.info("通过 user.png 点击三条杆菜单入口成功", image_path=str(user_menu_image_path))
-                else:
-                    # 图片等待后仍未命中时记录错误日志。
-                    self.log.error("未找到三条杆菜单入口图片", image_path=str(user_menu_image_path))
-                    return False
-            # 图片识别过程异常时记录日志，避免整轮流程直接崩溃。
-            except Exception as exc:
-                # 记录图片兜底失败详情，便于后续替换模板图。
-                self.log.exception("通过 user.png 查找三条杆菜单入口失败", error=str(exc))
+            # 通过 user.png 做菜单入口图片兜底，未命中时按失败返回。
+            if not self._safe_click_image_template(
+                "通过 user.png 点击三条杆菜单入口",
+                "images",
+                "fr",
+                "facebook",
+                "user.png",
+                timeout_sec=10,
+                interval_sec=2,
+                optional=True,
+                resolution=(1080, 2340),
+            ):
+                # 图片未命中时记录错误日志，便于后续继续调模板。
+                self.log.error("未找到三条杆菜单入口图片")
+                return False
+
 
 
 
@@ -2804,7 +2907,7 @@ class OpenSettingsTask:
                     poco(FACEBOOK_PROFILE_PHOTO_BUTTON_3[self.device_lang]),
                     ],
                     desc="首页头像按钮v2",
-                    sleep_interval=10,
+                    sleep_interval=5,
             ):
                 break
 
@@ -2823,15 +2926,45 @@ class OpenSettingsTask:
                             poco(FACEBOOK_PROFILE_PHOTO_BUTTON_3[self.device_lang]),
                         ],
                         desc="首页头像按钮v3",
-                        sleep_interval=5,
+                        sleep_interval=10,
                 ):
                     break
 
-        #
-        # self.poco_find_or_click(poco(FACEBOOK_PROFILE_PHOTO_BUTTON_4[self.device_lang]), "首页头像按钮第二步", sleep_interval=3)
+        # 通过 camera.png 做“进入相册/相机入口”的图片兜底。
+        self._safe_click_image_template(
+                "通过 camera.png 点击跳转相册",
+                "images",
+                "fr",
+                "facebook",
+                "camera.png",
+                timeout_sec=10,
+                interval_sec=2,
+                optional=True,
+                record_pos=(-0.359, -0.469),
+                resolution=(1080, 2340),
+        )
+
         if not self.poco_find_or_click(poco(FACEBOOK_PROFILE_PHOTO_BOTTOM_BUTTON[self.device_lang]), " 点击跳转相册", sleep_interval=3):
+
+            # 图片兜底也未命中时记录错误日志。
             self.log.error("未找到打开底部相册按钮")
-            return False
+            # 通过 choose_img.png 做“选择图片”入口图片兜底，并把预测区域放在下半屏附近。
+            if not self._safe_click_image_template(
+                    "通过 choose_img.png 点击选择图片入口",
+                    "images",
+                    "fr",
+                    "facebook",
+                    "choose_img.png",
+                    timeout_sec=5,
+                    interval_sec=1,
+                    optional=True,
+                    record_pos=(0.0, 0.542),
+                    resolution=(1080, 2340),
+            ):
+                # 图片未命中时记录错误日志，便于后续继续调模板。
+                self.log.error("未找到选择图片入口图片")
+                return False
+            # 返回 False 表示当前步骤失败。
 
         # 预先定位“相册授权”按钮。
         # facebook_album_auth_button_node =
@@ -2851,22 +2984,22 @@ class OpenSettingsTask:
                 # 当前轮无命中时结束循环。
                 break
 
-        # todo 找图 Template(r"images/fr/facebook/autoriser.png", record_pos=(0.001, 0.366), resolution=(1080, 2340))
-        # 解析打包可用的 user.png 图片路径，作为菜单入口的图片兜底。
-        user_menu_image_path = self._resolve_image_asset_path("images", "fr", "facebook", "autoriser.png")
-        # 基于 user.png 构建 Airtest 模板对象。
-        user_menu_template = Template(str(user_menu_image_path),resolution=(1080, 2340))
-        # 先等待图片出现，降低直接 exists 命中率不稳定的问题。
-        wait(user_menu_template, timeout=20, interval=3)
-        # 图片存在时执行点击。
-        if exists(user_menu_template):
-            # 点击图片入口进入 Facebook 菜单页。
-            touch(user_menu_template)
-            # 记录图片兜底点击成功日志。
-            self.log.info("通过 autoriser.png 点击三条杆菜单入口成功", image_path=str(user_menu_image_path))
-
+        # 尝试使用 autoriser.png 作为相册授权按钮的可选图片兜底。
+        if self._safe_click_image_template(
+            "通过 autoriser.png 点击相册授权入口",
+            "images",
+            "fr",
+            "facebook",
+            "autoriser.png",
+            timeout_sec=20,
+            interval_sec=3,
+            optional=True,
+            record_pos=(0.001, 0.366),
+            resolution=(1080, 2340),
+        ):
+            # 图片兜底点击成功时，再补跑一轮授权按钮候选，兼容点击后又出现系统确认弹框。
             for round_index in range(2):
-            # 每轮命中任一候选就点击。
+                # 每轮命中任一候选就点击。
                 if not self.poco_find_or_click(
                         nodes=[poco(text=FACEBOOK_AUTORISER_AUTH_BUTTON[self.device_lang]), poco("android:id/button1"),poco("com.android.permissioncontroller:id/permission_allow_button")],
                         desc=f"相册授权弹层候选-{round_index}",

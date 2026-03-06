@@ -224,11 +224,12 @@ poco(desc="Profil, onglet 6 sur 6").click()
 
      
      
-     
+
+
+Template(r"tpl1772827017892.png", record_pos=(-0.359, -0.469), resolution=(1080, 2340))
 
 
 
 
-
-
+Template(r"tpl1772827910221.png", record_pos=(-0.414, 0.832), resolution=(1080, 2340))
 
