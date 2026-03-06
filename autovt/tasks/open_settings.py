@@ -256,24 +256,51 @@ class OpenSettingsTask:
     def _resolve_facebook_apk_path(self) -> Path:
         # 保存候选路径列表，按优先级依次尝试。
         candidates: list[Path] = []
+        # 保存已追加过的路径字符串，避免重复候选污染日志。
+        seen_candidates: set[str] = set()
+
+        # 定义“安全追加候选路径”的局部方法。
+        def append_candidate(path: Path) -> None:
+            # 统一把路径转成绝对路径后再去重。
+            resolved_path = path.resolve()
+            # 已经存在于候选列表时直接跳过。
+            if str(resolved_path) in seen_candidates:
+                return
+            # 记录当前候选路径字符串。
+            seen_candidates.add(str(resolved_path))
+            # 追加到候选路径列表。
+            candidates.append(resolved_path)
+
         # 读取当前可执行文件所在目录（源码运行/打包运行都可用）。
         exe_dir = Path(sys.executable).resolve().parent
         # 候选 1：可执行文件同级目录下的 apks/facebook.apk。
-        candidates.append(exe_dir / "apks" / "facebook.apk")
+        append_candidate(exe_dir / "apks" / "facebook.apk")
         # 候选 2：可执行文件上一级目录下的 apks/facebook.apk。
-        candidates.append(exe_dir.parent / "apks" / "facebook.apk")
-        # 候选 3：macOS .app 场景下，app 包外层目录同级 apks/facebook.apk。
+        append_candidate(exe_dir.parent / "apks" / "facebook.apk")
+
+        # 读取当前启动命令对应脚本/可执行文件路径。
+        argv0_value = str(sys.argv[0]).strip() if sys.argv else ""
+        # Windows/Flet 多进程场景下，再尝试 argv[0] 同级路径。
+        if argv0_value:
+            # 解析 argv[0] 所在目录。
+            argv0_dir = Path(argv0_value).resolve().parent
+            # 候选 3：argv[0] 同级目录下的 apks/facebook.apk。
+            append_candidate(argv0_dir / "apks" / "facebook.apk")
+            # 候选 4：argv[0] 上一级目录下的 apks/facebook.apk。
+            append_candidate(argv0_dir.parent / "apks" / "facebook.apk")
+
+        # 候选 5：macOS .app 场景下，app 包外层目录同级 apks/facebook.apk。
         try:
             # 尝试追加 .app 外层候选路径。
-            candidates.append(exe_dir.parents[2] / "apks" / "facebook.apk")
+            append_candidate(exe_dir.parents[2] / "apks" / "facebook.apk")
         # 非 .app 目录结构时忽略该候选。
         except Exception:
             # 不中断流程，继续尝试其他候选路径。
             pass
-        # 候选 4：当前工作目录下的 apks/facebook.apk。
-        candidates.append(Path.cwd() / "apks" / "facebook.apk")
-        # 候选 5：源码项目根目录下的 apks/facebook.apk。
-        candidates.append(Path(__file__).resolve().parents[2] / "apks" / "facebook.apk")
+        # 候选 6：当前工作目录下的 apks/facebook.apk。
+        append_candidate(Path.cwd() / "apks" / "facebook.apk")
+        # 候选 7：源码项目根目录下的 apks/facebook.apk。
+        append_candidate(Path(__file__).resolve().parents[2] / "apks" / "facebook.apk")
         # 逐个候选检查文件是否存在。
         for candidate in candidates:
             # 命中存在且是文件时直接返回。
@@ -2271,7 +2298,7 @@ class OpenSettingsTask:
             if not _run_step_or_fail(
                 step_desc="等待 Create New Facebook Account 按钮2",
                 fail_reason="未找到 Create New Facebook Account 按钮2",
-                action=lambda: self._safe_wait_exists(create_user_page2_node, 70, "Create New Facebook Account 按钮2"),
+                action=lambda: self._safe_wait_exists(create_user_page2_node, 100, "Create New Facebook Account 按钮2"),
             ):
                 # 步骤失败且重试后仍失败时，直接结束当前流程。
                 return False
