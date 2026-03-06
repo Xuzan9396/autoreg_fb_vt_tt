@@ -256,8 +256,12 @@ class OpenSettingsTask:
     def _resolve_facebook_apk_path(self) -> Path:
         # 保存候选路径列表，按优先级依次尝试。
         candidates: list[Path] = []
+        # 保存待扫描的 apks 目录，便于精确命名未命中时继续兜底。
+        apk_dirs: list[Path] = []
         # 保存已追加过的路径字符串，避免重复候选污染日志。
         seen_candidates: set[str] = set()
+        # 保存已追加过的 apks 目录字符串，避免重复扫描。
+        seen_apk_dirs: set[str] = set()
 
         # 定义“安全追加候选路径”的局部方法。
         def append_candidate(path: Path) -> None:
@@ -270,6 +274,15 @@ class OpenSettingsTask:
             seen_candidates.add(str(resolved_path))
             # 追加到候选路径列表。
             candidates.append(resolved_path)
+            # 解析候选文件所在 apks 目录。
+            apk_dir = resolved_path.parent
+            # 已记录过该目录时直接跳过。
+            if str(apk_dir) in seen_apk_dirs:
+                return
+            # 记录当前目录字符串，避免重复扫描。
+            seen_apk_dirs.add(str(apk_dir))
+            # 追加到 apks 目录列表，后续可继续扫描实际文件名。
+            apk_dirs.append(apk_dir)
 
         # 读取当前可执行文件所在目录（源码运行/打包运行都可用）。
         exe_dir = Path(sys.executable).resolve().parent
@@ -306,6 +319,26 @@ class OpenSettingsTask:
             # 命中存在且是文件时直接返回。
             if candidate.exists() and candidate.is_file():
                 return candidate
+        # 精确文件名未命中时，再扫描附近 apks 目录中的真实 apk 文件名。
+        for apk_dir in apk_dirs:
+            # 目录不存在或不是目录时直接跳过。
+            if not apk_dir.exists() or not apk_dir.is_dir():
+                continue
+            try:
+                # 读取目录下全部 apk 文件。
+                apk_files = [item for item in apk_dir.iterdir() if item.is_file() and item.suffix.lower() == ".apk"]
+            # 单个目录读取异常时继续尝试其他目录。
+            except Exception:
+                # 不抛出，继续下一目录兜底。
+                continue
+            # 先尝试大小写无关的精确命中。
+            for apk_file in apk_files:
+                if apk_file.name.lower() == "facebook.apk":
+                    return apk_file.resolve()
+            # 再尝试前缀命中，兼容 facebook.apk.apk 一类 Windows 隐藏扩展名场景。
+            for apk_file in apk_files:
+                if apk_file.name.lower().startswith("facebook"):
+                    return apk_file.resolve()
         # 全部候选都不存在时抛出明确错误，便于排查。
         raise FileNotFoundError(
             "未找到 facebook.apk（期望外置在可执行文件同级 apks 目录），候选路径："

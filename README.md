@@ -1,6 +1,6 @@
 # autovt
 
-git tag -a v1.1.1 -m "修改" &&  git push origin v1.1.1
+git tag -a v1.1.2 -m "修改" &&  git push origin v1.1.2
 
 uv run python main.py
 uv run python test.py facebook_run_all

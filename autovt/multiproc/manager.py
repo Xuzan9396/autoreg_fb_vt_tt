@@ -161,26 +161,86 @@ class DeviceProcessManager:
         """解析 facebook.apk 路径，优先使用“可执行文件同级 apks”外置目录。"""
         # 保存候选路径，按优先级依次尝试。
         candidates: list[Path] = []
-        # 解析当前可执行文件所在目录（源码模式通常是 Python 所在目录，打包模式是 exe/app 内部目录）。
+        # 保存待扫描的 apks 目录，便于在精确命名未命中时做兜底扫描。
+        apk_dirs: list[Path] = []
+        # 保存已追加过的路径字符串，避免重复候选污染日志。
+        seen_candidates: set[str] = set()
+        # 保存已追加过的 apks 目录字符串，避免重复扫描。
+        seen_apk_dirs: set[str] = set()
+
+        # 定义“安全追加候选路径”的局部方法。
+        def append_candidate(path: Path) -> None:
+            # 统一把路径转成绝对路径后再去重。
+            resolved_path = path.resolve()
+            # 已经追加过时直接跳过。
+            if str(resolved_path) in seen_candidates:
+                return
+            # 记录当前候选路径，便于后续报错输出。
+            seen_candidates.add(str(resolved_path))
+            # 追加到候选列表尾部，保持优先级顺序。
+            candidates.append(resolved_path)
+            # 解析候选文件所在 apks 目录。
+            apk_dir = resolved_path.parent
+            # 已记录过该目录时直接跳过。
+            if str(apk_dir) in seen_apk_dirs:
+                return
+            # 记录目录字符串，避免重复扫描。
+            seen_apk_dirs.add(str(apk_dir))
+            # 追加到 apks 目录列表，后续可做模糊文件名兜底。
+            apk_dirs.append(apk_dir)
+
+        # 解析当前可执行文件所在目录。
         exe_dir = Path(sys.executable).resolve().parent
-        # 候选 1：可执行文件同级目录下的 apks/facebook.apk（用户要求的主路径）。
-        candidates.append(exe_dir / FACEBOOK_APK_RELATIVE_PATH)
-        # 候选 2：可执行文件上一级目录下的 apks/facebook.apk（部分打包目录结构兜底）。
-        candidates.append(exe_dir.parent / FACEBOOK_APK_RELATIVE_PATH)
-        # 候选 3：macOS .app 场景下，app 包外层目录同级 apks/facebook.apk。
+        # 优先使用可执行文件同级目录下的 apks/facebook.apk。
+        append_candidate(exe_dir / FACEBOOK_APK_RELATIVE_PATH)
+        # 再尝试可执行文件上一级目录下的 apks/facebook.apk。
+        append_candidate(exe_dir.parent / FACEBOOK_APK_RELATIVE_PATH)
+
+        # 解析当前启动命令对应脚本/可执行文件所在目录。
+        argv0_value = str(sys.argv[0]).strip() if sys.argv else ""
+        # Windows/Flet 打包下，多进程子进程有时更接近 argv[0] 所在目录。
+        if argv0_value:
+            # 解析 argv[0] 对应目录。
+            argv0_dir = Path(argv0_value).resolve().parent
+            # 追加 argv[0] 同级 apks/facebook.apk。
+            append_candidate(argv0_dir / FACEBOOK_APK_RELATIVE_PATH)
+            # 追加 argv[0] 上一级 apks/facebook.apk。
+            append_candidate(argv0_dir.parent / FACEBOOK_APK_RELATIVE_PATH)
+
+        # macOS .app 场景下，继续尝试 app 包外层目录同级 apks/facebook.apk。
         try:
-            candidates.append(exe_dir.parents[2] / FACEBOOK_APK_RELATIVE_PATH)
+            # 追加 .app 外层候选路径。
+            append_candidate(exe_dir.parents[2] / FACEBOOK_APK_RELATIVE_PATH)
         except Exception:
             # 非 .app 目录结构时忽略该候选。
             pass
-        # 候选 4：当前工作目录下的 apks/facebook.apk（命令行切目录运行兜底）。
-        candidates.append(Path.cwd() / FACEBOOK_APK_RELATIVE_PATH)
-        # 候选 5：源码运行路径（项目根目录）下的 apks/facebook.apk。
-        candidates.append(Path(__file__).resolve().parents[2] / FACEBOOK_APK_RELATIVE_PATH)
+        # 当前工作目录下的 apks/facebook.apk 作为命令行运行兜底。
+        append_candidate(Path.cwd() / FACEBOOK_APK_RELATIVE_PATH)
+        # 源码运行路径（项目根目录）下的 apks/facebook.apk 作为最后兜底。
+        append_candidate(Path(__file__).resolve().parents[2] / FACEBOOK_APK_RELATIVE_PATH)
         # 逐个候选检查文件是否存在。
         for candidate in candidates:
             if candidate.exists() and candidate.is_file():
                 return candidate
+        # 精确文件名未命中时，扫描附近 apks 目录中的实际 apk 文件名做兜底。
+        for apk_dir in apk_dirs:
+            # 目录不存在时直接跳过。
+            if not apk_dir.exists() or not apk_dir.is_dir():
+                continue
+            try:
+                # 读取目录下全部 apk 文件。
+                apk_files = [item for item in apk_dir.iterdir() if item.is_file() and item.suffix.lower() == ".apk"]
+            except Exception:
+                # 单个目录读取失败时继续尝试其他目录。
+                continue
+            # 先尝试大小写无关的精确文件名命中。
+            for apk_file in apk_files:
+                if apk_file.name.lower() == "facebook.apk":
+                    return apk_file.resolve()
+            # 再尝试前缀命中，兼容 facebook.apk.apk 一类 Windows 隐藏扩展名场景。
+            for apk_file in apk_files:
+                if apk_file.name.lower().startswith("facebook"):
+                    return apk_file.resolve()
         # 全部候选失效时，抛出明确错误，便于用户定位。
         raise FileNotFoundError(
             "未找到 facebook.apk（期望外置在可执行文件同级 apks 目录），请确认文件存在："
@@ -324,7 +384,16 @@ class DeviceProcessManager:
             apk_path = self._resolve_facebook_apk_path()
         except Exception as exc:
             log.exception("解析 Facebook 安装包路径失败", serial=serial, error=str(exc))
-            return f"{serial}: 安装失败（找不到 facebook.apk）"
+            return f"{serial}: 安装失败（找不到 facebook.apk，请确认 AutoVT.exe 同级 apks/facebook.apk 存在，且文件名不是 facebook.apk.apk）"
+        # 记录最终命中的安装包路径，便于排查 Windows 打包运行定位问题。
+        log.info(
+            "已解析 Facebook 安装包路径",
+            serial=serial,
+            apk_path=str(apk_path),
+            sys_executable=str(sys.executable),
+            sys_argv0=str(sys.argv[0]) if sys.argv else "",
+            cwd=str(Path.cwd()),
+        )
         # 执行安装命令（-r 覆盖安装，-d 允许降级）。
         try:
             result = self._run_adb_for_serial(
