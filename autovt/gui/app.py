@@ -34,6 +34,7 @@ class AutoVTGuiApp:
         self.page = page
         self._logged_in = False
         self._monitor_running = True
+        self._closing = False
 
         # ── 后端服务 ──
         self.manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
@@ -115,6 +116,10 @@ class AutoVTGuiApp:
         self.page.window.alignment = ft.Alignment.CENTER
         # 设置运行时窗口图标（从 assets 目录加载）。
         self.page.window.icon = "icon.png"
+        # 拦截系统窗口关闭事件，确保关窗时先停止全部 worker。
+        self.page.window.prevent_close = True
+        # 绑定窗口事件处理器，用于响应系统关闭动作。
+        self.page.window.on_event = self._on_window_event
 
     def _register_exit_hook(self) -> None:
         atexit.register(self._shutdown)
@@ -257,9 +262,33 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _handle_exit(self, _e: ft.ControlEvent) -> None:
+        self._request_shutdown_and_close()
+
+    def _on_window_event(self, e: ft.WindowEvent) -> None:
+        # 仅处理窗口关闭事件，其它事件直接忽略。
+        if e.type != ft.WindowEventType.CLOSE:
+            return
+        # 记录关窗事件日志，便于排查“关窗后仍在跑”的问题。
+        log.warning("收到系统窗口关闭事件，准备停止全部并退出")
+        # 复用统一退出链路，避免关窗时遗漏 stop_all。
+        self._request_shutdown_and_close()
+
+    def _request_shutdown_and_close(self) -> None:
+        # 已在关闭流程中时直接返回，避免重复 stop_all。
+        if self._closing:
+            return
+        # 标记关闭流程已启动。
+        self._closing = True
+        # 先展示退出提示，给用户明确反馈。
         self._show_snack("正在退出并停止全部进程...")
-        self._shutdown()
-        self.page.run_task(self._close_window_async)
+        # 在后台任务中执行停机和关窗，避免阻塞 UI 线程。
+        self.page.run_task(self._shutdown_and_close_async)
+
+    async def _shutdown_and_close_async(self) -> None:
+        # 把 stop_all/close 放到后台线程执行，避免 UI 卡死。
+        await asyncio.to_thread(self._shutdown)
+        # 停机完成后继续执行窗口关闭。
+        await self._close_window_async()
 
     async def _close_window_async(self) -> None:
         await asyncio.sleep(0.5)
@@ -381,14 +410,18 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _shutdown(self) -> None:
-        if not self._monitor_running:
-            return
+        # 停掉后台监控循环，避免退出期间继续触发自动刷新。
         self._monitor_running = False
         try:
             messages = self.manager.stop_all()
             log.info("GUI 退出清理完成", count=len(messages), messages=messages)
         except Exception:
             log.exception("GUI 退出清理失败（stop_all）")
+        try:
+            released = self.manager.reset_all_running_accounts(reason="gui_shutdown")
+            log.info("GUI 退出兜底释放运行中账号完成", released=released)
+        except Exception:
+            log.exception("GUI 退出清理失败（reset_all_running_accounts）")
         try:
             self.manager.close()
         except Exception:

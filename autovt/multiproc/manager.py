@@ -448,6 +448,21 @@ class DeviceProcessManager:
         except Exception as exc:
             log.exception("释放设备占用账号失败", serial=serial, reason=reason, error=str(exc))
 
+    # 定义“全局释放所有运行中账号”方法，供应用退出时兜底调用。
+    def reset_all_running_accounts(self, reason: str) -> int:
+        # 初始化影响行数，异常时回退 0。
+        released = 0
+        try:
+            # 执行全局重置：把所有 status=1 的账号回退为 0，并清空设备绑定。
+            released = self.user_db.reset_all_running_users()
+            # 记录本次全局释放结果，便于排查退出后账号残留问题。
+            log.info("已全局释放运行中账号", released=released, reason=reason)
+        except Exception as exc:
+            # 记录异常但不向上抛，避免退出链路被中断。
+            log.exception("全局释放运行中账号失败", reason=reason, error=str(exc))
+        # 返回影响行数，供上层日志展示。
+        return released
+
     def _finalize_worker_stop(
         self,
         *,
@@ -647,6 +662,58 @@ class DeviceProcessManager:
             log.warning("发送 stop 命令失败，改用 stop_event", serial=serial, error=str(exc))
         worker.stop_event.set()
 
+    def _kill_worker_process_tree(self, worker: WorkerHandle, serial: str, reason: str) -> None:
+        # psutil 不可用时无法做进程树清理，直接跳过。
+        if psutil is None:
+            return
+        # 读取 worker 主进程 PID。
+        pid = int(worker.process.pid or -1)
+        # PID 无效时直接跳过，避免 psutil 抛异常。
+        if pid <= 0:
+            return
+        try:
+            # 构造 worker 主进程句柄。
+            proc = psutil.Process(pid)
+        except Exception as exc:
+            # 主进程句柄不存在时记录调试日志即可。
+            log.debug("构造 worker 进程句柄失败，跳过进程树清理", serial=serial, pid=pid, reason=reason, error=str(exc))
+            return
+        try:
+            # 先读取当前仍存活的全部子孙进程。
+            children = proc.children(recursive=True)
+        except Exception as exc:
+            # 读取子进程树失败时记录告警，不影响主流程。
+            log.warning("读取 worker 子进程树失败", serial=serial, pid=pid, reason=reason, error=str(exc))
+            return
+        # 没有子孙进程时直接返回。
+        if not children:
+            return
+        # 逐个尝试终止子孙进程。
+        for child in children:
+            try:
+                # 先发送 terminate，给子进程一点优雅退出机会。
+                child.terminate()
+            except Exception:
+                # 单个子进程 terminate 失败时忽略，后续统一 kill 兜底。
+                continue
+        try:
+            # 等待子孙进程短时间退出。
+            _, alive_children = psutil.wait_procs(children, timeout=1.2)
+        except Exception as exc:
+            # wait_procs 失败时回退到“全部视为仍存活”。
+            log.warning("等待 worker 子进程退出失败，准备直接 kill", serial=serial, pid=pid, reason=reason, error=str(exc))
+            alive_children = children
+        # 对仍存活的子孙进程执行 kill 兜底。
+        for child in alive_children:
+            try:
+                # 强制杀掉残留子进程，避免 adb/pocoservice 宿主进程泄露。
+                child.kill()
+            except Exception:
+                # 单个子进程 kill 失败时继续处理其余进程。
+                continue
+        # 记录本次进程树清理结果日志。
+        log.info("worker 子进程树清理完成", serial=serial, pid=pid, reason=reason, child_count=len(children), alive_after_terminate=len(alive_children))
+
     def stop_worker(self, serial: str, timeout_sec: float | None = None) -> str:
         # 停止指定设备子进程：先优雅停止，超时再强杀。
         self.drain_events()
@@ -666,10 +733,14 @@ class DeviceProcessManager:
             worker.process.join(grace_timeout_sec)
 
         if worker.process.is_alive():
+            # 主进程仍未退出时，先清理其子进程树，避免 adb/pocoservice 残留。
+            self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_worker_before_terminate")
             # 超时还没退就强制 terminate。
             worker.process.terminate()
             worker.process.join(WORKER_STOP_FORCE_TIMEOUT_SEC)
             if worker.process.is_alive():
+                # terminate 后再次清理一轮子进程树，避免孤儿进程残留。
+                self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_worker_before_kill")
                 # terminate 仍未退出时，最后使用 kill 兜底。
                 worker.process.kill()
                 worker.process.join(WORKER_STOP_FORCE_TIMEOUT_SEC)
@@ -741,6 +812,8 @@ class DeviceProcessManager:
         for serial in alive_after_grace:
             worker = self._workers.get(serial)
             if worker and worker.process.is_alive():
+                # terminate 前先清理 worker 子进程树，避免 adb/pocoservice 残留。
+                self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_all_before_terminate")
                 worker.process.terminate()
         terminate_deadline = time.time() + WORKER_STOP_FORCE_TIMEOUT_SEC
         alive_after_terminate = set(alive_after_grace)
@@ -756,6 +829,8 @@ class DeviceProcessManager:
         for serial in alive_after_terminate:
             worker = self._workers.get(serial)
             if worker and worker.process.is_alive():
+                # kill 前再次清理 worker 子进程树，避免孤儿 adb 进程残留。
+                self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_all_before_kill")
                 worker.process.kill()
         kill_deadline = time.time() + WORKER_STOP_FORCE_TIMEOUT_SEC
         alive_after_kill = set(alive_after_terminate)

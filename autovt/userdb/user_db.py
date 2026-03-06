@@ -42,10 +42,26 @@ VT_PWD_KEY = "vt_pwd"
 VT_PWD_DESC = "Vinted 全局密码配置（为空时表示不启用全局密码）"
 # 定义全局 vinted 密码默认值为空字符串（表示不启用全局密码）。
 VT_PWD_DEFAULT = ""
+# 定义 Facebook 删除控制配置 key 常量。
+FB_DELETE_NUM_KEY = "fb_delete_num"
+# 定义 Facebook 删除控制配置描述文案常量。
+FB_DELETE_NUM_DESC = "0 不删除，其他数字每隔第几次重装"
+# 定义 Facebook 删除控制默认值为 0（仅清理，不重装）。
+FB_DELETE_NUM_DEFAULT = "0"
+# 定义设置页 Facebook 账号清理控制配置 key 常量。
+SETTING_FB_DEL_NUM_KEY = "setting_fb_del_num"
+# 定义设置页 Facebook 账号清理控制配置描述文案常量。
+SETTING_FB_DEL_NUM_DESC = "0 不清理，其他数字每隔第几次执行设置页 Facebook 账号清理"
+# 定义设置页 Facebook 账号清理控制默认值为 0（不执行设置页清理）。
+SETTING_FB_DEL_NUM_DEFAULT = "0"
 # 定义状态重试次数最小值（0=不重试）。
 STATUS_23_RETRY_MIN = 0
 # 定义状态重试次数最大值（5=最多重试 5 次）。
 STATUS_23_RETRY_MAX = 5
+# 定义 Facebook 删除控制最小值（0=不删除）。
+FB_DELETE_NUM_MIN = 0
+# 定义 Facebook 删除控制最大值（防止异常大值）。
+FB_DELETE_NUM_MAX = 10000
 # 定义注册状态最小值（0=未注册）。
 REGISTER_STATUS_MIN = 0
 # 定义注册状态最大值（2=失败）。
@@ -388,6 +404,30 @@ class UserDB:
             (VT_PWD_KEY, vt_pwd_default_val, VT_PWD_DESC, now_ts()),
         # SQL 执行结束。
         )
+        # 计算并校验 Facebook 删除控制默认值。
+        fb_delete_default_val = self._normalize_config_value(FB_DELETE_NUM_KEY, FB_DELETE_NUM_DEFAULT)
+        # 插入 Facebook 删除控制默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (FB_DELETE_NUM_KEY, fb_delete_default_val, FB_DELETE_NUM_DESC, now_ts()),
+        # SQL 执行结束。
+        )
+        # 计算并校验设置页 Facebook 账号清理控制默认值。
+        setting_fb_del_default_val = self._normalize_config_value(SETTING_FB_DEL_NUM_KEY, SETTING_FB_DEL_NUM_DEFAULT)
+        # 插入设置页 Facebook 账号清理控制默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (SETTING_FB_DEL_NUM_KEY, setting_fb_del_default_val, SETTING_FB_DEL_NUM_DESC, now_ts()),
+        # SQL 执行结束。
+        )
 
     # 定义配置值标准化方法，并做 key 级别校验。
     def _normalize_config_value(self, key: str, val: str) -> str:
@@ -441,6 +481,46 @@ class UserDB:
                 raise ValueError("vt_pwd 长度不能超过 256 个字符")
             # 返回清理后的密码文本（可为空）。
             return raw_value
+        # 针对 Facebook 删除控制配置执行非负整数范围校验。
+        if key == FB_DELETE_NUM_KEY:
+            # 空值直接判定为非法。
+            if raw_value == "":
+                # 抛出明确错误提示。
+                raise ValueError("fb_delete_num 不能为空，需填写大于等于 0 的整数")
+            # 尝试把输入值解析为整数。
+            try:
+                # 转成整数做范围检查。
+                fb_delete_num = int(raw_value)
+            # 非整数输入直接报错。
+            except ValueError as exc:
+                # 抛出明确错误提示。
+                raise ValueError("fb_delete_num 必须是整数（0=仅清理，>0 为重装周期）") from exc
+            # 范围不在允许区间时判定为非法。
+            if not FB_DELETE_NUM_MIN <= fb_delete_num <= FB_DELETE_NUM_MAX:
+                # 抛出范围错误提示。
+                raise ValueError(f"fb_delete_num 超出范围，必须在 {FB_DELETE_NUM_MIN} 到 {FB_DELETE_NUM_MAX} 之间")
+            # 返回标准化后的整数文本。
+            return str(fb_delete_num)
+        # 针对设置页 Facebook 账号清理控制配置执行非负整数范围校验。
+        if key == SETTING_FB_DEL_NUM_KEY:
+            # 空值直接判定为非法。
+            if raw_value == "":
+                # 抛出明确错误提示。
+                raise ValueError("setting_fb_del_num 不能为空，需填写大于等于 0 的整数")
+            # 尝试把输入值解析为整数。
+            try:
+                # 转成整数做范围检查。
+                setting_fb_del_num = int(raw_value)
+            # 非整数输入直接报错。
+            except ValueError as exc:
+                # 抛出明确错误提示。
+                raise ValueError("setting_fb_del_num 必须是整数（0=不清理，>0 为设置页清理周期）") from exc
+            # 范围不在允许区间时判定为非法。
+            if not FB_DELETE_NUM_MIN <= setting_fb_del_num <= FB_DELETE_NUM_MAX:
+                # 抛出范围错误提示。
+                raise ValueError(f"setting_fb_del_num 超出范围，必须在 {FB_DELETE_NUM_MIN} 到 {FB_DELETE_NUM_MAX} 之间")
+            # 返回标准化后的整数文本。
+            return str(setting_fb_del_num)
         # 其他 key 当前不做额外规则，直接返回清理后文本。
         return raw_value
 
@@ -841,6 +921,31 @@ class UserDB:
             # SQL 执行结束。
             )
         # 返回释放影响行数。
+        return int(cursor.rowcount)
+
+    # 定义“全局重置运行中账号”方法（status=1 -> 0，并清空 device）。
+    def reset_all_running_users(self) -> int:
+        # 获取可用连接。
+        conn = self.connect()
+        # 生成本次批量重置更新时间戳。
+        update_time = now_ts()
+        # 使用事务上下文执行批量更新，保证原子性。
+        with conn:
+            # 执行全局释放 SQL，仅回退仍处于“使用中”的账号。
+            cursor = conn.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET
+                    status = 0,
+                    device = '',
+                    update_at = ?
+                WHERE status = 1;
+                """,
+                # 传入更新时间参数。
+                (int(update_time),),
+            # SQL 执行结束。
+            )
+        # 返回批量重置影响行数。
         return int(cursor.rowcount)
 
     # 定义“按用户 id 清空 device 绑定（不改 status）”方法。
@@ -1407,6 +1512,14 @@ class UserDB:
             elif key_value == VT_PWD_KEY:
                 # 采用默认描述文案。
                 desc_value = VT_PWD_DESC
+            # Facebook 删除控制配置使用固定默认描述。
+            elif key_value == FB_DELETE_NUM_KEY:
+                # 采用默认描述文案。
+                desc_value = FB_DELETE_NUM_DESC
+            # 设置页 Facebook 账号清理控制配置使用固定默认描述。
+            elif key_value == SETTING_FB_DEL_NUM_KEY:
+                # 采用默认描述文案。
+                desc_value = SETTING_FB_DEL_NUM_DESC
 
         # 生成本次写入更新时间戳。
         update_time = now_ts()

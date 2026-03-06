@@ -72,6 +72,10 @@ FACEBOOK_ACCEPT_ALL_COOKIE_BUTTON = {"fr": "Autoriser tous les cookies", "en": "
 FACEBOOK_MENU_TAB_DESC = {"fr": "Menu, onglet 5 sur 5", "en":"" }
 
 
+FACEBOOK_MENU_TAB_USER = {"fr": "Profil, onglet 4 sur 4", "en":"" }
+
+
+
 # Ajouter une photo 添加头像新的弹框
 FACEBOOK_ADD_PHOTO_POPUP = {"fr": "Ajouter une photo", "en": ""}
 
@@ -81,9 +85,8 @@ FACEBOOK_ADD_PHOTO_POPUP = {"fr": "Ajouter une photo", "en": ""}
 # votre photo de profil
 # Facebook 首页头像按钮文案映射（按语言）
 FACEBOOK_PROFILE_PHOTO_BUTTON = {"fr": "votre photo de profil", "en": ""}
-
 FACEBOOK_PROFILE_PHOTO_BUTTON_2 = {"fr": "Ajouter", "en": ""}
-
+FACEBOOK_PROFILE_PHOTO_BUTTON_4 = {"fr": "Ajouter une photo de profil", "en": ""}
 FACEBOOK_PROFILE_PHOTO_BUTTON_3 = {"fr": "Photo de profil", "en": ""}
 
 # 选择唤醒相册
@@ -93,6 +96,7 @@ FACEBOOK_PROFILE_PHOTO_BOTTOM_BUTTON = {"fr": "Choisir une photo de profil", "en
 # 相册授权 Autoriser l’accès
 # Facebook 相册授权按钮文案映射（按语言）
 FACEBOOK_ALBUM_AUTH_BUTTON = {"fr": "Autoriser l’accès", "en": ""}
+FACEBOOK_AUTORISER_AUTH_BUTTON = {"fr": "Autoriser", "en": ""}
 
 
 # 确认相片 ENREGISTRER
@@ -118,3 +122,11 @@ FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON = {"fr": "Continuer", "en": ""}
 # 聚焦验证码
 # Entrez le code
 FACEBOOK_FOCUS_EMAIL_CODE_INPUT = {"fr": "Entrez le code", "en": ""}
+
+
+# 设置页“密码和账户”入口文案映射（按语言）。
+SETTING_PASSWORDS_AND_ACCOUNTS = {"fr": "Mots de passe et comptes", "en": "Passwords and accounts"}
+# 设置页 Facebook 账号项文案映射（按语言）。
+SETTING_FACEBOOK_ACCOUNT = {"fr": "Facebook", "en": "Facebook"}
+# 设置页顶部返回按钮文案映射（按语言）。
+SETTING_NAVIGATE_UP = {"fr": "Parcourir vers le haut", "en": "Navigate up"}

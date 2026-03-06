@@ -169,6 +169,12 @@ def run_target_method(task: OpenSettingsTask, method_name: str) -> None:
         # 当前分支结束后返回。
         return
 
+    if method_name == "facebook_again_upload":
+        # 执行 Facebook 再次上传方法。
+        task.facebook_again_upload()
+        # 当前分支结束后返回。
+        return
+
     # 只跑抹机王某一轮。
     if method_name == "mojiwang_run_one_loop":
         # 读取第2个参数作为 loop_index，默认 0。

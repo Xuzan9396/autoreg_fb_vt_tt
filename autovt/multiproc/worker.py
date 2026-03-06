@@ -23,6 +23,12 @@ from autovt.settings import (
 )
 from autovt.tasks.task_context import TaskContext
 from autovt.userdb import (
+    FB_DELETE_NUM_DEFAULT,
+    FB_DELETE_NUM_KEY,
+    FB_DELETE_NUM_MAX,
+    FB_DELETE_NUM_MIN,
+    SETTING_FB_DEL_NUM_DEFAULT,
+    SETTING_FB_DEL_NUM_KEY,
     STATUS_23_RETRY_MAX,
     STATUS_23_RETRY_MAX_DEFAULT,
     STATUS_23_RETRY_MAX_KEY,
@@ -161,6 +167,30 @@ def _read_status_23_retry_limit(config_map: dict[str, str]) -> int:
         # 返回最大值 5。
         return STATUS_23_RETRY_MAX
     # 返回合法重试次数（语义：0=不重试，1=重试一次）。
+    return parsed_value
+
+
+def _read_fb_delete_num(config_map: dict[str, str]) -> int:
+    # 从 t_config 映射读取 Facebook 重装周期配置，并做边界保护。
+    # 读取配置原始值，缺失时回退默认值 0。
+    raw_value = str(config_map.get(FB_DELETE_NUM_KEY, FB_DELETE_NUM_DEFAULT)).strip()
+    # 尝试解析整数。
+    try:
+        # 转成整数，便于后续范围校验。
+        parsed_value = int(raw_value)
+    # 非法值（如空串或非数字）时回退默认值。
+    except Exception:
+        # 返回默认值 0（仅清理，不重装）。
+        return int(FB_DELETE_NUM_DEFAULT)
+    # 小于最小值时回退到最小值。
+    if parsed_value < FB_DELETE_NUM_MIN:
+        # 返回最小值。
+        return FB_DELETE_NUM_MIN
+    # 大于最大值时截断到最大值。
+    if parsed_value > FB_DELETE_NUM_MAX:
+        # 返回最大值。
+        return FB_DELETE_NUM_MAX
+    # 返回合法配置值（0=仅清理，>0=按周期触发重装）。
     return parsed_value
 
 
@@ -639,6 +669,8 @@ def worker_main(
                 "mojiwang_run_num": "3",
                 STATUS_23_RETRY_MAX_KEY: STATUS_23_RETRY_MAX_DEFAULT,
                 VT_PWD_KEY: VT_PWD_DEFAULT,
+                FB_DELETE_NUM_KEY: FB_DELETE_NUM_DEFAULT,
+                SETTING_FB_DEL_NUM_KEY: SETTING_FB_DEL_NUM_DEFAULT,
             # 回退默认配置，确保任务循环可继续运行。
             }
             log.exception("读取 t_config 失败，使用默认配置", error=str(exc), fallback_config=config_map)
@@ -730,6 +762,26 @@ def worker_main(
 
     paused = False
     unknown_error_count = 0
+    # 记录当前 worker 子进程已执行任务轮次（每次 run_once 前 +1）。
+    worker_loop_seq = 0
+
+    def _attach_worker_loop_seq(runtime_context: TaskContext) -> TaskContext:
+        # 声明要修改外层轮次计数器。
+        nonlocal worker_loop_seq
+        # 每次执行任务前轮次加 1。
+        worker_loop_seq += 1
+        # 复制 extras 映射，避免直接复用共享引用。
+        extras = dict(runtime_context.extras or {})
+        # 写入当前 worker 任务轮次，供任务层读取。
+        extras["worker_loop_seq"] = int(worker_loop_seq)
+        # 回填到任务上下文。
+        runtime_context.extras = extras
+        # 读取当前 fb_delete_num 配置值用于日志展示。
+        fb_delete_num = _read_fb_delete_num(runtime_context.config_map)
+        # 记录本次执行轮次日志，便于定位“第几轮”相关逻辑。
+        log.info("任务即将执行", worker_loop_seq=worker_loop_seq, fb_delete_num=fb_delete_num)
+        # 返回已注入轮次的上下文对象。
+        return runtime_context
 
     try:
         # 主循环：直到收到 stop。
@@ -791,6 +843,8 @@ def worker_main(
                     if runtime_context is None:
                         continue
 
+                    # 注入本次执行对应的 worker 轮次。
+                    runtime_context = _attach_worker_loop_seq(runtime_context)
                     email_account = str(runtime_context.user_info.get("email_account", "")).strip()
                     try:
                         run_once(task_context=runtime_context)
@@ -859,6 +913,8 @@ def worker_main(
                 _sleep_with_stop(stop_event, max(loop_interval_sec, WORKER_WAITING_POLL_INTERVAL_SEC))
                 continue
 
+            # 注入本次执行对应的 worker 轮次。
+            runtime_context = _attach_worker_loop_seq(runtime_context)
             email_account = str(runtime_context.user_info.get("email_account", "")).strip()
             try:
                 run_once(task_context=runtime_context)

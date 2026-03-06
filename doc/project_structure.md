@@ -65,7 +65,7 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并尝试自动重建 `Poco`，避免流程直接崩溃；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当检测到设备连接异常时会跳过 `status=3/fb_status=0` 失败回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；任务结束会主动关闭任务内 `UserDB` 连接。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并先执行 `setup_device() + create_poco()` 重建整套运行时；若当前步骤重试后仍是连接异常，则立即抛给 worker 执行 `reinit_runtime()`，避免脚本带着失效的触控/输入通道继续往下跑；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当检测到设备连接异常时会跳过 `status=3/fb_status=0` 失败回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；支持 `fb_delete_num` 配置（`0=仅清理`、`>0` 且 `worker_loop_seq % fb_delete_num == 0` 时执行卸载+重装），也支持 `setting_fb_del_num` 配置（`0=不清理`、`>0` 且 `worker_loop_seq % setting_fb_del_num == 0` 时执行 `setting_clean_fb()`，自动打开系统设置并循环删除 Facebook 账号）；由 worker 每轮注入 `worker_loop_seq` 到 `TaskContext.extras` 后在任务层判定执行；任务结束会主动关闭任务内 `UserDB` 连接。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住。
 - `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；不再把 `apks/facebook.apk` 打进可执行文件，改为在发布 zip 中与 `.exe/.app` 同级提供外置 `apks/` 目录；仍会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
@@ -163,10 +163,12 @@ autovt/
 
 1. GUI 退出时执行 `_shutdown()`：
    - `manager.stop_all()`
+   - `manager.reset_all_running_accounts("gui_shutdown")`
    - `manager.close()`
    - `user_db.close()`
 2. CLI 退出时在 `finally`：
    - `manager.stop_all()`
+   - `manager.reset_all_running_accounts("cli_shutdown")`
    - `manager.close()`
 
 ## SQLite DB 都做了什么（`autovt/userdb/user_db.py`）
@@ -194,6 +196,8 @@ autovt/
    - `t_config.mojiwang_run_num=3`（缺失才写入）。
    - `t_config.status_23_retry_max_num=0`（缺失才写入，表示默认不重试）。
    - `t_config.vt_pwd=''`（缺失才写入，空值表示不启用全局密码兜底）。
+   - `t_config.fb_delete_num=0`（缺失才写入，默认仅清理 Facebook 数据，不执行重装）。
+   - `t_config.setting_fb_del_num=0`（缺失才写入，默认不执行“设置页删除 Facebook 账号”流程）。
 
 ### 3) 索引
 
@@ -213,6 +217,10 @@ autovt/
    - `status=1 -> 0`；
    - `status=2/3` 不改状态；
    - 统一清空 `device`。
+4. 应用退出全局兜底（`reset_all_running_users`）：
+   - 把所有 `status=1` 的账号统一回退为 `0`；
+   - 统一清空 `device`；
+   - 用于 GUI 关窗、`退出并停止全部`、CLI `Ctrl+C/exit` 的最终兜底，防止异常退出后账号残留“使用中”。
 
 ### 5) 业务读写能力
 
@@ -223,6 +231,7 @@ autovt/
    - 读取单项、读取 map、更新配置。
    - `mojiwang_run_num` 限制为 `1~100`。
    - `status_23_retry_max_num` 限制为 `0~5`。
+   - `fb_delete_num` 限制为 `0~10000`（`0` 不删除，其他数字每隔第几次重装；命中条件为 `worker_loop_seq % fb_delete_num == 0`）。
 
 ## 扩展建议
 
@@ -264,15 +273,17 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - 账号 Tab 状态文案：
 - `fb_status/vinted_status/titok_status`：`0=未注册`、`1=成功`、`2=失败`
 - `status`：`0=未使用`、`1=正在使用`、`2=已经使用`、`3=账号问题`
-- 设置 Tab：读取 `t_config` 并支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`、`vt_pwd`
+- 设置 Tab：读取 `t_config` 并支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`、`vt_pwd`、`fb_delete_num`、`setting_fb_del_num`
 - `mojiwang_run_num` 规则：仅允许 `1~100` 整数
 - `status_23_retry_max_num` 规则：仅允许 `0~5` 整数（`0`=不重试，`1`=重试 1 次，`3`=重试 3 次，最大 `5` 次）
 - 设置 Tab 的 `status_23_retry_max_num` 输入框在 Flet UI 层已加输入限制：仅允许输入 `0~5` 单个数字
 - `vt_pwd` 规则：允许空值；非空时长度不超过 `256` 字符
+- `fb_delete_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不删除，其他数字每隔第几次重装”
+- `setting_fb_del_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不清理，其他数字每隔第几次执行设置页 Facebook 账号清理”
 - 登录页：默认走加密 API 登录；当环境变量 `GITXUZAN_LOGIN=1` 时跳过 API 登录校验（任意账号密码可登录）
 - 登录页：登录成功后会写入本地缓存，重新打开软件自动回填上次账号密码
 - 登录页：`401 Unauthorized` 按“账号或密码错误”处理，只打印告警日志，不输出异常堆栈
-- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`、`vt_pwd=''`（缺失时自动补齐）
+- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`、`vt_pwd=''`、`fb_delete_num=0`、`setting_fb_del_num=0`（缺失时自动补齐）
 - GUI 已去掉：`once/run_once` 单轮手动触发入口
 
 ## 多设备账号分配规则（当前版）

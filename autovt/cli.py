@@ -177,9 +177,25 @@ def run_console(loop_interval_sec: float) -> None:
     finally:
         # 退出前先回收所有子进程，避免遗留僵尸进程。
         print("正在停止所有子进程...")
-        for msg in manager.stop_all():
-            print(msg)
-            log.info("停止子进程结果", message=msg)
+        try:
+            # 执行 stop_all，并逐条输出停止结果。
+            for msg in manager.stop_all():
+                # 把停止结果输出到控制台。
+                print(msg)
+                # 记录停止结果到日志。
+                log.info("停止子进程结果", message=msg)
+        except Exception as exc:
+            # stop_all 失败时记录日志，但继续执行后续全局释放。
+            log.exception("CLI 退出清理失败（stop_all）", error=str(exc))
+            # 把异常摘要打印到控制台，便于用户感知。
+            print(f"停止所有子进程失败: {exc}")
+        # 退出前再做一次全局账号释放，兜底回退残留的“使用中”状态。
+        released = manager.reset_all_running_accounts(reason="cli_shutdown")
+        # 把释放结果输出到控制台，便于确认退出清理是否完成。
+        print(f"已兜底释放运行中账号: {released}")
+        # 记录退出兜底释放结果到日志。
+        log.info("CLI 退出兜底释放运行中账号完成", released=released)
+        # 关闭 manager 持有的数据库连接和资源。
         manager.close()
         print("主控已退出。")
         log.info("主控已退出")
