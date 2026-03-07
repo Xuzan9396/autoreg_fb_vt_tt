@@ -147,6 +147,8 @@ class OpenSettingsTask:
         self.user_db = UserDB()
         # 初始化 Facebook 失败原因缓存，失败时会写入 t_user.msg。
         self.facebook_error_reason = ""
+        # 初始化 Facebook 失败状态码，默认普通失败写入 status=3。
+        self.facebook_error_status = 3
         # 初始化“本轮是否检测到设备连接异常”标记，默认未检测到。
         self._runtime_disconnect_detected = False
 
@@ -1916,9 +1918,11 @@ class OpenSettingsTask:
     def _reset_facebook_error_reason(self) -> None:
         # 把失败原因重置为空字符串，避免串到下一轮任务。
         self.facebook_error_reason = ""
+        # 把失败状态码重置为普通失败状态，避免串到下一轮任务。
+        self.facebook_error_status = 3
 
     # 定义“记录 Facebook 失败原因并返回 False”的方法。
-    def _facebook_fail(self, reason: str) -> bool:
+    def _facebook_fail(self, reason: str, target_status: int = 3) -> bool:
         # 标准化失败原因字符串，避免空值落库不可读。
         safe_reason = str(reason or "").strip()
         # 当调用方传空原因时，回退统一文案。
@@ -1927,8 +1931,15 @@ class OpenSettingsTask:
             safe_reason = "Facebook 注册失败：未知原因"
         # 保存失败原因，供 run_once 统一写入 t_user.msg。
         self.facebook_error_reason = safe_reason
+        # 保存失败状态码，供 run_once 收尾阶段统一回写到 t_user.status。
+        self.facebook_error_status = int(target_status)
         # 记录错误日志，确保失败链路可追踪。
-        self.log.error("Facebook 注册流程失败", reason=safe_reason, user_email=self.user_email)
+        self.log.error(
+            "Facebook 注册流程失败",
+            reason=safe_reason,
+            target_status=self.facebook_error_status,
+            user_email=self.user_email,
+        )
         # 返回 False，便于调用方直接 `return self._facebook_fail(...)`。
         return False
 
@@ -1955,10 +1966,12 @@ class OpenSettingsTask:
             self.log.error("更新 t_user 失败：email_account 为空", success=success)
             # 直接返回，避免无意义 SQL。
             return
-        # 成功时账号状态写 2（已完成）。
-        target_status = 2 if success else 3
+        # 成功时账号状态写 2（已完成），失败时使用流程内记录的失败状态码。
+        target_status = 2 if success else int(self.facebook_error_status)
         # 成功时 Facebook 状态写 1，失败写 0。
         target_fb_status = 1 if success else 0
+        # 失败时累加 Facebook 失败次数，成功时不清零。
+        should_increment_fb_fail_num = not bool(success)
         # 成功时清空 msg，失败时写入具体错误原因。
         target_msg = "" if success else str(reason or "Facebook 注册失败：未知原因").strip()
         # 控制 msg 长度，避免写入过长异常字符串。
@@ -1975,6 +1988,8 @@ class OpenSettingsTask:
                 fb_status=target_fb_status,
                 # 目标备注信息。
                 msg=target_msg,
+                # 失败时原子累加 Facebook 失败次数，成功时保持原值。
+                increment_fb_fail_num=should_increment_fb_fail_num,
             )
             # 记录落库结果，便于后续排查是否命中记录。
             self.log.info(
@@ -1982,6 +1997,7 @@ class OpenSettingsTask:
                 email_account=self.user_email,
                 status=target_status,
                 fb_status=target_fb_status,
+                increment_fb_fail_num=should_increment_fb_fail_num,
                 msg=target_msg,
                 affected_rows=affected_rows,
             )
@@ -1993,6 +2009,7 @@ class OpenSettingsTask:
                 email_account=self.user_email,
                 status=target_status,
                 fb_status=target_fb_status,
+                increment_fb_fail_num=should_increment_fb_fail_num,
                 msg=target_msg,
                 error=str(exc),
             )
@@ -2673,8 +2690,6 @@ class OpenSettingsTask:
         cached_fb_code: str | None = None
 
 
-
-
         if  self._safe_wait_exists(poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]), 5, "再次刷新按钮v2"):
             self._safe_click(poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]), "刷新验证码按钮v2", sleep_interval=3)
 
@@ -2733,6 +2748,9 @@ class OpenSettingsTask:
             if not matched:
                 break
 
+        if self._safe_wait_exists(poco(FACEBOOK_SUBMIT_AFTER[self.device_lang]),1,"被风控了出现了,"+ FACEBOOK_SUBMIT_AFTER[self.device_lang]):
+            # 命中风控页时单独回写 status=4，便于后续筛选和人工处理。
+            return self._facebook_fail("被风控了出现了,"+ FACEBOOK_SUBMIT_AFTER[self.device_lang], target_status=4)
 
 
 
@@ -3261,9 +3279,9 @@ class OpenSettingsTask:
             if facebook_ok:
                 # 回写成功状态并清空 msg。
                 self._update_fb_result_to_db(success=True, reason="")
-            # Facebook 失败时写入 status=3, fb_status=0, msg=具体错误原因。
+            # Facebook 失败时写入 status=3/4, fb_status=0, msg=具体错误原因。
             else:
-                # 设备连接异常场景下，不把账号打成 status=3，避免误判账号问题。
+                # 设备连接异常场景下，不把账号打成失败状态，避免误判账号问题。
                 if self._runtime_disconnect_detected:
                     # 记录跳过失败落库日志，便于后续排查。
                     self.log.warning(

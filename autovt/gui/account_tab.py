@@ -67,6 +67,7 @@ class AccountTab:
         self.page_text: ft.Text | None = None
         self.prev_button: ft.OutlinedButton | None = None
         self.next_button: ft.OutlinedButton | None = None
+        self.retryable_problem_count_text: ft.Text | None = None
         self.import_country_dropdown: ft.Dropdown | None = None
         self.import_file_picker: ft.FilePicker | None = None
 
@@ -86,6 +87,8 @@ class AccountTab:
         self.quick_parse_input: ft.TextField | None = None
         self.form_feedback_text: ft.Text | None = None
         self._editing_device_value = ""
+        # 缓存当前编辑账号的 Facebook 失败累计次数，避免编辑时被默认值覆盖。
+        self._editing_fb_fail_num = 0
         self._active_dialog: ft.AlertDialog | None = None
         self._active_dialog_title = ""
         self._active_dialog_trace_id: str | None = None
@@ -108,7 +111,14 @@ class AccountTab:
         self.search_input = ft.TextField(label="邮箱搜索", hint_text="输入 email_account 关键字", width=280, on_submit=self._apply_filters, col={"xs": 12, "md": 2})
         self.status_filter_dropdown = ft.Dropdown(
             label="status 筛选", width=180, value="", col={"xs": 6, "md": 2},
-            options=[ft.dropdown.Option("", "全部"), ft.dropdown.Option("0", "0 未使用"), ft.dropdown.Option("1", "1 正在使用"), ft.dropdown.Option("2", "2 已经使用"), ft.dropdown.Option("3", "3 账号问题")],
+            options=[
+                ft.dropdown.Option("", "全部"),
+                ft.dropdown.Option("0", "0 未使用"),
+                ft.dropdown.Option("1", "1 正在使用"),
+                ft.dropdown.Option("2", "2 已经使用"),
+                ft.dropdown.Option("3", "3 账号问题"),
+                ft.dropdown.Option("4", "4 风控限制"),
+            ],
         )
         self.fb_filter_dropdown = ft.Dropdown(
             label="FB 筛选", width=150, value="", col={"xs": 6, "md": 2},
@@ -158,17 +168,39 @@ class AccountTab:
         if self.import_file_picker not in self.page.services:
             # 把文件选择器挂到页面级 services。
             self.page.services.append(self.import_file_picker)
+        # 创建“可恢复账号数量”提示文本，避免把数量直接拼进按钮文案导致宽度抖动。
+        self.retryable_problem_count_text = ft.Text(
+            value="可恢复: -",
+            size=12,
+            color=ft.Colors.BLUE_GREY_700,
+        )
+        # 将“一键恢复”按钮与可恢复数量并排展示，便于用户直接判断是否有可处理账号。
+        reset_problem_action = ft.Row(
+            controls=[
+                ft.OutlinedButton("一键恢复账号问题", icon=ft.Icons.RESTART_ALT, on_click=self._reset_retryable_problem_accounts),
+                self.retryable_problem_count_text,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
         actions = ft.Row(
             controls=[
                 ft.FilledButton("新增账号", icon=ft.Icons.ADD, on_click=self._open_create_dialog),
                 ft.FilledButton("刷新账号", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
+                reset_problem_action,
                 ft.OutlinedButton("一键导出", icon=ft.Icons.DOWNLOAD, on_click=self._handle_export_filtered_accounts),
                 import_country_selector,
                 ft.OutlinedButton("一键导入文件", icon=ft.Icons.UPLOAD_FILE, on_click=self._pick_import_file),
             ],
             alignment=ft.MainAxisAlignment.START,
             spacing=8,
+        )
+        # 展示“风控状态 + 一键恢复账号问题”的规则说明，避免用户误解批量操作条件。
+        problem_reset_hint = ft.Text(
+            "说明：风控页会写入 status=4（风控限制）；按钮右侧“可恢复: N”为当前命中的可恢复账号数；“一键恢复账号问题”只处理 status=3 且 fb_fail_num<3 且 fb_status!=1 的账号，执行后改为 status=0 并清空 device。",
+            size=12,
+            color=ft.Colors.BLUE_GREY_700,
         )
         filters = ft.ResponsiveRow(
             controls=[
@@ -192,6 +224,7 @@ class AccountTab:
         return ft.Column(
             controls=[
                 actions,
+                problem_reset_hint,
                 filters,
                 ft.Row([self.summary_text, self.last_refresh_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(height=1, color=ft.Colors.BLUE_GREY_100),
@@ -219,6 +252,8 @@ class AccountTab:
         count_elapsed_ms = 0
         # 初始化列表查询耗时（毫秒）。
         list_elapsed_ms = 0
+        # 初始化“可恢复账号数”查询耗时（毫秒）。
+        retryable_count_elapsed_ms = 0
         # 初始化渲染提交耗时（毫秒）。
         render_elapsed_ms = 0
         if self._refreshing or not self.list_column:
@@ -255,6 +290,12 @@ class AccountTab:
 
             # 记录渲染提交起点。
             step_started_at = time.monotonic()
+            # 先刷新“一键恢复”按钮旁的可恢复数量，保证顶部统计与列表数据同步。
+            self._update_retryable_problem_count(source=source)
+            # 统计“可恢复账号数”查询耗时。
+            retryable_count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 重新记录渲染提交起点，避免把数量查询时间算进渲染耗时。
+            step_started_at = time.monotonic()
             self._render_rows(rows)
             self._update_summary(self._total, len(rows))
             self._update_pagination()
@@ -274,6 +315,7 @@ class AccountTab:
                     total_elapsed_ms=total_elapsed_ms,
                     count_elapsed_ms=count_elapsed_ms,
                     list_elapsed_ms=list_elapsed_ms,
+                    retryable_count_elapsed_ms=retryable_count_elapsed_ms,
                     render_elapsed_ms=render_elapsed_ms,
                     page_index=self._page_index,
                     total_count=self._total,
@@ -287,6 +329,7 @@ class AccountTab:
                     total_elapsed_ms=total_elapsed_ms,
                     count_elapsed_ms=count_elapsed_ms,
                     list_elapsed_ms=list_elapsed_ms,
+                    retryable_count_elapsed_ms=retryable_count_elapsed_ms,
                     render_elapsed_ms=render_elapsed_ms,
                     page_index=self._page_index,
                     total_count=self._total,
@@ -302,6 +345,7 @@ class AccountTab:
                     error=str(exc),
                     count_elapsed_ms=count_elapsed_ms,
                     list_elapsed_ms=list_elapsed_ms,
+                    retryable_count_elapsed_ms=retryable_count_elapsed_ms,
                     render_elapsed_ms=render_elapsed_ms,
                 )
                 # 手动刷新时给用户提示，自动刷新场景避免刷屏。
@@ -314,11 +358,49 @@ class AccountTab:
                     source=source,
                     count_elapsed_ms=count_elapsed_ms,
                     list_elapsed_ms=list_elapsed_ms,
+                    retryable_count_elapsed_ms=retryable_count_elapsed_ms,
                     render_elapsed_ms=render_elapsed_ms,
                 )
                 self._show_snack(f"刷新账号失败: {exc}")
         finally:
             self._refreshing = False
+
+    def _update_retryable_problem_count(self, source: str) -> None:
+        # 顶部计数控件尚未构建时直接返回，避免初始化阶段访问空引用。
+        if not self.retryable_problem_count_text:
+            return
+        try:
+            # 查询当前满足“一键恢复”条件的账号总数。
+            retryable_count = self.user_db.count_retryable_problem_users(max_fb_fail_num=3)
+            # 对统计结果做非负保护，避免异常值污染界面。
+            safe_retryable_count = max(int(retryable_count), 0)
+            # 把最新数量显示到按钮右侧文本。
+            self.retryable_problem_count_text.value = f"可恢复: {safe_retryable_count}"
+            # 有可恢复账号时使用更醒目的颜色，方便用户注意到待处理数量。
+            if safe_retryable_count > 0:
+                self.retryable_problem_count_text.color = ft.Colors.ORANGE_700
+                self.retryable_problem_count_text.weight = ft.FontWeight.W_600
+            # 没有可恢复账号时恢复中性色，降低视觉噪音。
+            else:
+                self.retryable_problem_count_text.color = ft.Colors.BLUE_GREY_700
+                self.retryable_problem_count_text.weight = ft.FontWeight.W_500
+        except Exception as exc:
+            # SQLite 锁冲突只记录告警，避免影响账号列表主刷新链路。
+            if self._is_sqlite_locked_error(exc):
+                log.warning(
+                    "刷新可恢复账号数量遇到 SQLite 锁冲突，已跳过本轮更新",
+                    source=source,
+                    error=str(exc),
+                )
+            # 其它异常记录完整堆栈，便于定位统计 SQL 或 UI 刷新问题。
+            else:
+                log.exception("刷新可恢复账号数量失败", source=source)
+            # 统计失败时显示占位符，避免界面继续展示旧数量误导用户。
+            self.retryable_problem_count_text.value = "可恢复: -"
+            # 失败占位符使用中性色，保持界面稳定。
+            self.retryable_problem_count_text.color = ft.Colors.BLUE_GREY_700
+            # 失败占位符恢复常规字重。
+            self.retryable_problem_count_text.weight = ft.FontWeight.W_500
 
     # ═══════════════════════════════════════════════════════════════════
     # 渲染
@@ -345,6 +427,8 @@ class AccountTab:
         status_val = int(row_data.get("status", 0))
         vinted_val = int(row_data.get("vinted_status", 0))
         fb_val = int(row_data.get("fb_status", 0))
+        # 读取 Facebook 失败累计次数，空值时安全回退 0。
+        fb_fail_num = int(row_data.get("fb_fail_num", 0) or 0)
         tiktok_val = int(row_data.get("titok_status", 0))
         update_at_val = int(row_data.get("update_at", 0))
 
@@ -390,6 +474,7 @@ class AccountTab:
                         spacing=6, run_spacing=6,
                     ),
                     ft.Text(f"姓名: {name_text} | 更新时间: {update_text}", size=12, color=ft.Colors.BLUE_GREY_700),
+                    ft.Text(f"FB失败累计: {fb_fail_num}", size=12, color=ft.Colors.BLUE_GREY_700),
                     ft.Text(f"设备ID: {device_id or '-'}", size=12, color=ft.Colors.BLUE_GREY_700),
                     ft.Text(f"email_access_key: {masked_key}", size=12, color=ft.Colors.BLUE_GREY_800),
                     ft.Text(f"备注: {msg or '-'}", size=12, color=ft.Colors.BLUE_GREY_700, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
@@ -489,6 +574,24 @@ class AccountTab:
             self.titok_filter_dropdown.value = ""
         self._page_index = 1
         self.refresh(source="filter_reset", show_toast=False)
+
+    def _reset_retryable_problem_accounts(self, _e: ft.ControlEvent | None = None) -> None:
+        # 记录批量恢复动作开始日志，便于排查“为什么有些账号没有被改回去”。
+        log.info("开始批量恢复可重试账号问题记录")
+        try:
+            # 执行批量恢复：仅处理 status=3、失败次数小于 3、且 fb_status 非成功的账号。
+            affected_rows = self.user_db.reset_retryable_problem_users(max_fb_fail_num=3)
+            # 记录本次批量恢复影响行数。
+            log.info("批量恢复可重试账号问题记录完成", affected_rows=affected_rows)
+            # 恢复完成后刷新当前列表，确保界面立即反映最新状态。
+            self.refresh(source="reset_problem_accounts", show_toast=False)
+            # 给出操作结果提示。
+            self._show_snack(f"一键恢复账号问题完成，共更新 {affected_rows} 条账号。")
+        except Exception as exc:
+            # 记录批量恢复异常栈，便于定位 SQL 或刷新异常。
+            log.exception("批量恢复可重试账号问题记录失败", error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"一键恢复账号问题失败: {exc}")
 
     # 定义“导出按钮点击入口”方法。
     def _handle_export_filtered_accounts(self, _e: ft.ControlEvent | None = None) -> None:
@@ -932,6 +1035,8 @@ class AccountTab:
         initial_row = dict(row) if row else self._build_create_form_defaults()
         v = lambda k, d="": str(initial_row.get(k, d)) if initial_row else d  # noqa: E731
         self._editing_device_value = v("device", "")
+        # 缓存当前编辑账号的 Facebook 失败累计次数，避免编辑其他字段时被重置。
+        self._editing_fb_fail_num = int(initial_row.get("fb_fail_num", 0) or 0) if initial_row else 0
 
         self.quick_parse_input = ft.TextField(
             label="一键识别（固定 4 段）",
@@ -952,7 +1057,7 @@ class AccountTab:
         def _dropdown(label: str, value: str, width: int, options: list[tuple[str, str]]) -> ft.Dropdown:
             return ft.Dropdown(label=label, value=value, width=width, options=[ft.dropdown.Option(k, t) for k, t in options])
 
-        self.status_dropdown = _dropdown("status（账号状态）", v("status", "0"), 340, [("0", "0 未使用"), ("1", "1 正在使用"), ("2", "2 已经使用"), ("3", "3 账号问题")])
+        self.status_dropdown = _dropdown("status（账号状态）", v("status", "0"), 340, [("0", "0 未使用"), ("1", "1 正在使用"), ("2", "2 已经使用"), ("3", "3 账号问题"), ("4", "4 风控限制")])
         self.fb_status_dropdown = _dropdown("fb_status（fb 注册状态）", v("fb_status", "0"), 220, [("0", "0 未注册"), ("1", "1 成功"), ("2", "2 失败")])
         self.vinted_status_dropdown = _dropdown("vinted_status（vt 注册状态）", v("vinted_status", "0"), 220, [("0", "0 未注册"), ("1", "1 成功"), ("2", "2 失败")])
         self.titok_status_dropdown = _dropdown("titok_status（tt 注册状态）", v("titok_status", "0"), 220, [("0", "0 未注册"), ("1", "1 成功"), ("2", "2 失败")])
@@ -1372,6 +1477,8 @@ class AccountTab:
             last_name=g(self.last_name_input),
             pwd=g(self.pwd_input),
             fb_status=g(self.fb_status_dropdown) or "0",
+            # 保留当前账号已有的 Facebook 失败累计次数，不允许编辑弹窗改写。
+            fb_fail_num=self._editing_fb_fail_num,
             vinted_status=g(self.vinted_status_dropdown) or "0",
             titok_status=g(self.titok_status_dropdown) or "0",
             device=self._editing_device_value,

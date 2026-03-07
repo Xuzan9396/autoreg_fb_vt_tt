@@ -82,10 +82,14 @@ FB_DELETE_NUM_MAX = 10000
 REGISTER_STATUS_MIN = 0
 # 定义注册状态最大值（2=失败）。
 REGISTER_STATUS_MAX = 2
+# 定义 Facebook 失败累计次数最小值（0=从未失败）。
+FB_FAIL_NUM_MIN = 0
+# 定义 Facebook 失败累计次数最大值（使用 32 位有符号整型上限做保护）。
+FB_FAIL_NUM_MAX = 2147483647
 # 定义账号状态最小值（0=未使用）。
 ACCOUNT_STATUS_MIN = 0
-# 定义账号状态最大值（3=账号问题）。
-ACCOUNT_STATUS_MAX = 3
+# 定义账号状态最大值（4=风控限制）。
+ACCOUNT_STATUS_MAX = 4
 # 定义 SQLite 连接超时时间（秒），用于多进程并发写时的锁等待。
 SQLITE_CONNECT_TIMEOUT_SEC = 30.0
 # 定义 SQLite busy_timeout（毫秒），用于降低 database is locked 报错概率。
@@ -184,7 +188,7 @@ class UserRecord:
     email_access_key: str = ""
     # 微软 OAuth 应用 client_id 字段，新增必填。
     client_id: str = ""
-    # 任务状态字段，默认 0（1=正在使用，2=已使用过）。
+    # 任务状态字段，默认 0（1=正在使用，2=已使用过，3=账号问题，4=风控限制）。
     status: int = 0
     # 名字段，默认空字符串。
     first_name: str = ""
@@ -194,6 +198,8 @@ class UserRecord:
     vinted_status: int = 0
     # Facebook 状态字段，默认 0（0=未注册，1=成功，2=失败）。
     fb_status: int = 0
+    # Facebook 注册失败累计次数字段，默认 0。
+    fb_fail_num: int = 0
     # titok 状态字段，默认 0（1=成功）。
     titok_status: int = 0
     # 业务密码字段，默认空字符串。
@@ -302,6 +308,7 @@ class UserDB:
             last_name TEXT NOT NULL DEFAULT '',
             vinted_status INTEGER NOT NULL DEFAULT 0 CHECK (vinted_status >= 0),
             fb_status INTEGER NOT NULL DEFAULT 0 CHECK (fb_status >= 0),
+            fb_fail_num INTEGER NOT NULL DEFAULT 0 CHECK (fb_fail_num >= 0),
             titok_status INTEGER NOT NULL DEFAULT 0 CHECK (titok_status >= 0),
             pwd TEXT NOT NULL DEFAULT '',
             device TEXT NOT NULL DEFAULT '',
@@ -365,6 +372,13 @@ class UserDB:
             # 执行 ALTER TABLE 增加 fb_status 字段，并设置默认值和非空约束。
             conn.execute(
                 f"ALTER TABLE {TABLE_NAME} ADD COLUMN fb_status INTEGER NOT NULL DEFAULT 0;"
+            # SQL 执行结束。
+            )
+        # 旧表缺少 fb_fail_num 列时执行补齐。
+        if "fb_fail_num" not in exists_columns:
+            # 执行 ALTER TABLE 增加 fb_fail_num 字段，并设置默认值和非空约束。
+            conn.execute(
+                f"ALTER TABLE {TABLE_NAME} ADD COLUMN fb_fail_num INTEGER NOT NULL DEFAULT 0;"
             # SQL 执行结束。
             )
         # 旧表缺少 client_id 列时执行补齐。
@@ -637,6 +651,11 @@ class UserDB:
         # 返回通过校验的整数值。
         return int_value
 
+    # 定义非负整数校验方法。
+    def _normalize_non_negative_int(self, field_name: str, raw_value: int | str, max_value: int) -> int:
+        # 复用整数范围校验方法，统一校验“非负且不超过上限”。
+        return self._normalize_int_range(field_name, raw_value, FB_FAIL_NUM_MIN, max_value)
+
     # 定义唯一键冲突识别方法（email_account）。
     def _is_unique_email_error(self, exc: sqlite3.IntegrityError) -> bool:
         # 读取数据库异常文本并转小写，便于统一匹配。
@@ -671,6 +690,8 @@ class UserDB:
         normalized_vinted_status = self._normalize_int_range("vinted_status", record.vinted_status, REGISTER_STATUS_MIN, REGISTER_STATUS_MAX)
         # 校验并标准化 fb 状态（0~2）。
         normalized_fb_status = self._normalize_int_range("fb_status", record.fb_status, REGISTER_STATUS_MIN, REGISTER_STATUS_MAX)
+        # 校验并标准化 Facebook 失败累计次数（0~2147483647）。
+        normalized_fb_fail_num = self._normalize_non_negative_int("fb_fail_num", record.fb_fail_num, FB_FAIL_NUM_MAX)
         # 校验并标准化 tt 状态（0~2）。
         normalized_titok_status = self._normalize_int_range("titok_status", record.titok_status, REGISTER_STATUS_MIN, REGISTER_STATUS_MAX)
         # 标准化设备字段（非必填，允许为空）。
@@ -702,6 +723,8 @@ class UserDB:
             vinted_status=normalized_vinted_status,
             # 写回标准化 fb 状态。
             fb_status=normalized_fb_status,
+            # 写回标准化 Facebook 失败累计次数。
+            fb_fail_num=normalized_fb_fail_num,
             # 写回标准化 tt 状态。
             titok_status=normalized_titok_status,
             # 写回标准化设备字段。
@@ -713,14 +736,16 @@ class UserDB:
 
     # 定义插入或更新方法（以 email_account 唯一键冲突处理）。
     def upsert_user(self, record: UserRecord) -> None:
+        # 先执行必填、状态和失败次数范围校验。
+        normalized_record = self.validate_user_record(record)
         # 获取可用连接。
         conn = self.connect()
         # 取当前时间戳用于默认 create_at/update_at。
         ts_now = now_ts()
         # 如果外部没传 create_at，则自动用当前时间戳。
-        create_at_value = record.create_at if record.create_at > 0 else ts_now
+        create_at_value = normalized_record.create_at if normalized_record.create_at > 0 else ts_now
         # 如果外部没传 update_at，则自动用当前时间戳。
-        update_at_value = record.update_at if record.update_at > 0 else ts_now
+        update_at_value = normalized_record.update_at if normalized_record.update_at > 0 else ts_now
         sql = f"""
         INSERT INTO {TABLE_NAME} (
             email_account,
@@ -732,13 +757,14 @@ class UserDB:
             last_name,
             vinted_status,
             fb_status,
+            fb_fail_num,
             titok_status,
             pwd,
             device,
             msg,
             create_at,
             update_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email_account) DO UPDATE SET
             email_pwd = excluded.email_pwd,
             email_access_key = excluded.email_access_key,
@@ -748,6 +774,7 @@ class UserDB:
             last_name = excluded.last_name,
             vinted_status = excluded.vinted_status,
             fb_status = excluded.fb_status,
+            fb_fail_num = excluded.fb_fail_num,
             titok_status = excluded.titok_status,
             pwd = excluded.pwd,
             device = excluded.device,
@@ -757,31 +784,33 @@ class UserDB:
         # 组装 SQL 参数元组，按占位符顺序传入。
         params = (
             # 传入邮箱账号。
-            record.email_account,
+            normalized_record.email_account,
             # 传入邮箱密码。
-            record.email_pwd,
+            normalized_record.email_pwd,
             # 传入邮箱 access_key。
-            record.email_access_key,
+            normalized_record.email_access_key,
             # 传入微软 OAuth 应用 client_id。
-            record.client_id,
+            normalized_record.client_id,
             # 传入状态并强转为 int。
-            int(record.status),
+            int(normalized_record.status),
             # 传入名字段。
-            record.first_name,
+            normalized_record.first_name,
             # 传入姓字段。
-            record.last_name,
+            normalized_record.last_name,
             # 传入 vinted 状态并强转为 int。
-            int(record.vinted_status),
+            int(normalized_record.vinted_status),
             # 传入 Facebook 状态并强转为 int。
-            int(record.fb_status),
+            int(normalized_record.fb_status),
+            # 传入 Facebook 失败累计次数并强转为 int。
+            int(normalized_record.fb_fail_num),
             # 传入 titok 状态并强转为 int。
-            int(record.titok_status),
+            int(normalized_record.titok_status),
             # 传入业务密码。
-            record.pwd,
+            normalized_record.pwd,
             # 传入设备 ID（仅展示字段）。
-            record.device,
+            normalized_record.device,
             # 传入备注说明。
-            record.msg,
+            normalized_record.msg,
             # 传入创建时间戳。
             int(create_at_value),
             # 传入更新时间戳。
@@ -973,7 +1002,7 @@ class UserDB:
             # 把原异常继续抛出给上层处理。
             raise
 
-    # 定义“按设备释放账号占用”方法（status=1 -> 0，status=2/3 保持不变）。
+    # 定义“按设备释放账号占用”方法（status=1 -> 0，status=2/3/4 保持不变）。
     def release_user_for_device(self, device: str) -> int:
         # 获取可用连接。
         conn = self.connect()
@@ -1327,13 +1356,14 @@ class UserDB:
             last_name,
             vinted_status,
             fb_status,
+            fb_fail_num,
             titok_status,
             pwd,
             device,
             msg,
             create_at,
             update_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         # 组装 SQL 参数元组。
         params = (
@@ -1355,6 +1385,8 @@ class UserDB:
             int(normalized_record.vinted_status),
             # fb 状态。
             int(normalized_record.fb_status),
+            # Facebook 失败累计次数。
+            int(normalized_record.fb_fail_num),
             # titok 状态。
             int(normalized_record.titok_status),
             # vinted 密码字段。
@@ -1412,6 +1444,7 @@ class UserDB:
             last_name = ?,
             vinted_status = ?,
             fb_status = ?,
+            fb_fail_num = ?,
             titok_status = ?,
             pwd = ?,
             device = ?,
@@ -1439,6 +1472,8 @@ class UserDB:
             int(normalized_record.vinted_status),
             # fb 状态。
             int(normalized_record.fb_status),
+            # Facebook 失败累计次数。
+            int(normalized_record.fb_fail_num),
             # titok 状态。
             int(normalized_record.titok_status),
             # vinted 密码字段。
@@ -1628,13 +1663,14 @@ class UserDB:
             # SQL 执行结束。
             )
 
-    # 定义按邮箱更新 status/fb_status（可选更新备注）方法。
+    # 定义按邮箱更新 status/fb_status（可选更新备注和失败累计次数）方法。
     def update_status(
         self,
         email_account: str,
         status: int,
         msg: str | None = None,
         fb_status: int | None = None,
+        increment_fb_fail_num: bool = False,
     ) -> int:
         # 获取可用连接。
         conn = self.connect()
@@ -1648,47 +1684,107 @@ class UserDB:
         update_time = now_ts()
         # 预处理备注文本参数（None 表示不更新 msg 字段）。
         safe_msg = None if msg is None else str(msg)
+        # 标准化“是否累加 Facebook 失败次数”参数。
+        should_increment_fb_fail_num = bool(increment_fb_fail_num)
+        # 初始化更新子句列表。
+        set_parts: list[str] = []
+        # 初始化 SQL 参数列表。
+        params: list[Any] = []
+        # 追加账号状态更新子句。
+        set_parts.append("status = ?")
+        # 追加账号状态参数。
+        params.append(int(status))
+        # 需要更新 fb_status 时追加对应 SQL 子句。
+        if fb_status is not None:
+            # 追加 Facebook 状态字段更新子句。
+            set_parts.append("fb_status = ?")
+            # 追加 Facebook 状态参数。
+            params.append(int(fb_status))
+        # 需要更新备注时追加对应 SQL 子句。
+        if safe_msg is not None:
+            # 追加备注字段更新子句。
+            set_parts.append("msg = ?")
+            # 追加备注字段参数。
+            params.append(safe_msg)
+        # 需要累加失败次数时追加原子自增子句。
+        if should_increment_fb_fail_num:
+            # 使用数据库原子自增，避免并发下先查后改导致覆盖。
+            set_parts.append("fb_fail_num = fb_fail_num + 1")
+        # 无论何种分支都追加更新时间字段。
+        set_parts.append("update_at = ?")
+        # 追加更新时间参数。
+        params.append(int(update_time))
+        # 最后追加 where 条件参数。
+        params.append(safe_email_account)
+        # 按当前子句动态拼接 UPDATE SQL。
+        sql = f"UPDATE {TABLE_NAME} SET {', '.join(set_parts)} WHERE email_account = ?;"
         # 使用事务上下文执行更新。
         with conn:
-            # 当 msg/fb_status 都不更新时，仅更新 status 和 update_at。
-            if safe_msg is None and fb_status is None:
-                # 执行最小字段更新 SQL。
-                cursor = conn.execute(
-                    # 只改状态和更新时间。
-                    f"UPDATE {TABLE_NAME} SET status = ?, update_at = ? WHERE email_account = ?;",
-                    # 传入 SQL 参数。
-                    (int(status), int(update_time), safe_email_account),
-                # SQL 执行结束。
-                )
-            # 当只更新 fb_status（不更新 msg）时执行此分支。
-            elif safe_msg is None and fb_status is not None:
-                # 执行状态 + Facebook 状态更新 SQL。
-                cursor = conn.execute(
-                    # 同时改 status、fb_status、update_at。
-                    f"UPDATE {TABLE_NAME} SET status = ?, fb_status = ?, update_at = ? WHERE email_account = ?;",
-                    # 传入 SQL 参数。
-                    (int(status), int(fb_status), int(update_time), safe_email_account),
-                # SQL 执行结束。
-                )
-            # 当只更新 msg（不更新 fb_status）时执行此分支。
-            elif safe_msg is not None and fb_status is None:
-                # 执行状态 + 备注更新 SQL。
-                cursor = conn.execute(
-                    # 同时改 status、msg、update_at。
-                    f"UPDATE {TABLE_NAME} SET status = ?, msg = ?, update_at = ? WHERE email_account = ?;",
-                    # 传入 SQL 参数。
-                    (int(status), safe_msg, int(update_time), safe_email_account),
-                # SQL 执行结束。
-                )
-            # 当 msg/fb_status 都需要更新时执行此分支。
-            else:
-                # 执行状态 + Facebook 状态 + 备注更新 SQL。
-                cursor = conn.execute(
-                    # 同时改 status、fb_status、msg、update_at。
-                    f"UPDATE {TABLE_NAME} SET status = ?, fb_status = ?, msg = ?, update_at = ? WHERE email_account = ?;",
-                    # 传入 SQL 参数。
-                    (int(status), int(fb_status), safe_msg, int(update_time), safe_email_account),
-                # SQL 执行结束。
-                )
+            # 执行动态拼接后的更新 SQL。
+            cursor = conn.execute(
+                # 使用动态 SQL 支持备注、fb_status、失败次数累加的任意组合。
+                sql,
+                # 传入与动态 SQL 对应的参数列表。
+                tuple(params),
+            # SQL 执行结束。
+            )
         # 返回受影响行数，便于上层判断是否更新成功。
+        return int(cursor.rowcount)
+
+    # 定义“统计可恢复账号总数”方法。
+    def count_retryable_problem_users(self, max_fb_fail_num: int = 3) -> int:
+        # 获取可用连接。
+        conn = self.connect()
+        # 对失败次数阈值做下限保护，避免传入负数导致条件失真。
+        safe_max_fb_fail_num = max(int(max_fb_fail_num), 0)
+        # 执行“可恢复账号数”统计 SQL。
+        cursor = conn.execute(
+            f"""
+            SELECT COUNT(1) AS total
+            FROM {TABLE_NAME}
+            WHERE
+                status = 3
+                AND fb_fail_num < ?
+                AND fb_status != 1;
+            """,
+            # 传入失败次数阈值参数。
+            (int(safe_max_fb_fail_num),),
+        # SQL 执行结束。
+        )
+        # 读取统计结果首行。
+        row = cursor.fetchone()
+        # 理论上不会为空，这里做防御性回退。
+        if row is None:
+            return 0
+        # 返回可恢复账号总数。
+        return int(row["total"])
+
+    # 定义“一键恢复可重试账号问题记录”方法。
+    def reset_retryable_problem_users(self, max_fb_fail_num: int = 3) -> int:
+        # 获取可用连接。
+        conn = self.connect()
+        # 对失败次数阈值做下限保护，避免传入负数导致全表命中。
+        safe_max_fb_fail_num = max(int(max_fb_fail_num), 0)
+        # 生成本次批量更新时间戳。
+        update_time = now_ts()
+        # 使用事务上下文执行批量更新，保证状态和 device 同步切换。
+        with conn:
+            # 执行批量恢复 SQL。
+            cursor = conn.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET
+                    status = 0,
+                    device = '',
+                    update_at = ?
+                WHERE
+                    status = 3
+                    AND fb_fail_num < ?
+                    AND fb_status != 1;
+                """,
+                # 传入更新时间和失败次数阈值。
+                (int(update_time), int(safe_max_fb_fail_num)),
+            # SQL 执行结束。
+            )
+        # 返回本次批量恢复影响行数。
         return int(cursor.rowcount)

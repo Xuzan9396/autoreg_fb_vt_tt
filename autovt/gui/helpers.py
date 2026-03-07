@@ -138,7 +138,7 @@ def register_status_color(value: int) -> str:
 
 def account_status_text(value: int) -> str:
     """把账号 status 数值转为中文文案。"""
-    mapping = {0: "未使用", 1: "正在使用", 2: "已经使用", 3: "账号问题"}
+    mapping = {0: "未使用", 1: "正在使用", 2: "已经使用", 3: "账号问题", 4: "风控限制"}
     return mapping.get(int(value), f"未知({int(value)})")
 
 
@@ -149,6 +149,7 @@ def account_status_color(value: int) -> str:
         1: ft.Colors.LIGHT_BLUE_700,
         2: ft.Colors.GREEN_700,
         3: ft.Colors.RED_700,
+        4: ft.Colors.DEEP_ORANGE_600,
     }
     return mapping.get(int(value), ft.Colors.GREY_700)
 

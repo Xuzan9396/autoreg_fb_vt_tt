@@ -1,6 +1,6 @@
 # autovt
 
-git tag -a v1.1.0 -m "修改" &&  git push origin v1.1.0
+git tag -a v1.1.3 -m "修改" &&  git push origin v1.1.3
 
 uv run python main.py
 uv run python test.py facebook_run_all
@@ -210,3 +210,20 @@ print(row)
 uv run python -m unittest -v tests/test_user_db.py
 ```
 
+
+1.各种官方教程文档：¶
+1）官方教程文档：https://airtest.doc.io.netease.com/
+
+2）Airtest API文档：https://airtest.readthedocs.io/zh_CN/latest/
+
+3）poco API文档：https://poco.readthedocs.io/zh_CN/latest/index.html
+https://poco.readthedocs.io/zh-cn/latest/source/README.html
+4）Airtest官方博客：https://juejin.im/user/1275089221067928
+
+
+3.各种官网地址：¶
+1）AirtestProject项目官网：http://airtest.netease.com/
+
+3）Airtest开源地址：https://github.com/AirtestProject/Airtest
+
+4）poco开源地址：https://github.com/AirtestProject/Poco/

@@ -440,7 +440,7 @@ class DeviceProcessManager:
         worker.updated_at = event_time
 
     def _release_device_account(self, serial: str, reason: str) -> None:
-        # 释放设备占用账号：status=1 回退 0；status=2/3 保持不变，仅清空 device。
+        # 释放设备占用账号：status=1 回退 0；status=2/3/4 保持不变，仅清空 device。
         try:
             released = self.user_db.release_user_for_device(serial)
             if released > 0:

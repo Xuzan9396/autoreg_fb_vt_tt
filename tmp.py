@@ -71,8 +71,26 @@ poco = AndroidUiautomationPoco(use_airtest_input=True, screenshot_each_action=Fa
 snapshot(msg="请填写测试点.")
 
 
+bools = poco("Cette Page n’est pas disponible pour le moment").exists()
+print(f"当前状态是: {bools}")
+
+
+bools = poco(text="La Page n’est pas disponible pour le moment").exists()
+
+print(f"当前状态是v2: {bools}")
+
+
      
-     
+poco("android.view.View").click()
+poco("Application prédite : Facebook").click()
+poco("android.widget.Button").click()
+poco("android.view.View").click()
+
+poco(text="Create new account").click()
+
+
+
+
 
 
 

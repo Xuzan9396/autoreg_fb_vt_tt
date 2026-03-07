@@ -118,15 +118,19 @@ FACEBOOK_IS_REGISTERED_BUTTON = {"fr": "Oui, me connecter en tant.*", "en": ""}
 
 FACEBOOK_CONTINUE_EMAIL_SIGN_UP_BUTTON = {"fr": "Continuer", "en": ""}
 
-
 # 聚焦验证码
 # Entrez le code
 FACEBOOK_FOCUS_EMAIL_CODE_INPUT = {"fr": "Entrez le code", "en": ""}
 
+# 风控到了注册失败了,提交验证码后
+FACEBOOK_SUBMIT_AFTER = {"fr": "Cette Page n’est pas disponible pour le moment", "en": ""}
 
+
+# ---------------------- 设置的模块文案 ----------------------
 # 设置页“密码和账户”入口文案映射（按语言）。
 SETTING_PASSWORDS_AND_ACCOUNTS = {"fr": "Mots de passe et comptes", "en": "Passwords and accounts"}
 # 设置页 Facebook 账号项文案映射（按语言）。
 SETTING_FACEBOOK_ACCOUNT = {"fr": "Facebook", "en": "Facebook"}
 # 设置页顶部返回按钮文案映射（按语言）。
 SETTING_NAVIGATE_UP = {"fr": "Parcourir vers le haut", "en": "Navigate up"}
+
