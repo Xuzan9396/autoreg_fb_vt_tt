@@ -85,6 +85,26 @@ def resolve_name_locale(country_label: str) -> str:
     return "fr_FR"
 
 
+# 定义“按 locale 生成姓名”的公共方法。
+def generate_account_name(name_locale: str) -> tuple[str, str]:
+    # 清理 locale 入参，避免空值导致 Faker 初始化异常。
+    safe_name_locale = str(name_locale or "fr_FR").strip() or "fr_FR"
+    # 初始化 Faker 实例，用于生成姓名。
+    faker_obj = Faker(safe_name_locale)
+    # 生成账号的姓。
+    generated_first_name = str(faker_obj.first_name()).strip()
+    # 生成账号的名。
+    generated_last_name = str(faker_obj.last_name()).strip()
+    # 兜底保障姓不为空。
+    if generated_first_name == "":
+        generated_first_name = "FirstName"
+    # 兜底保障名不为空。
+    if generated_last_name == "":
+        generated_last_name = "LastName"
+    # 返回生成后的姓名。
+    return generated_first_name, generated_last_name
+
+
 # 定义“读取文本文件内容”的方法。
 def read_text_file(file_path: str) -> str:
     # 把路径转成 Path 对象，便于后续操作。
@@ -273,8 +293,6 @@ class AccountFileImporter:
                 validation_errors=validation_errors,
                 insert_errors=[],
             )
-        # 初始化 Faker 实例，用于生成姓名。
-        faker_obj = Faker(str(name_locale or "fr_FR"))
         # 初始化文件内去重集合（忽略邮箱大小写）。
         seen_emails: set[str] = set()
         # 初始化写库统计计数器。
@@ -299,15 +317,8 @@ class AccountFileImporter:
             if existing_row is not None:
                 skipped_existing_count += 1
                 continue
-            # 生成导入账号的姓。
-            generated_first_name = str(faker_obj.first_name()).strip()
-            # 生成导入账号的名。
-            generated_last_name = str(faker_obj.last_name()).strip()
-            # 兜底保障姓名字段不为空。
-            if generated_first_name == "":
-                generated_first_name = "FirstName"
-            if generated_last_name == "":
-                generated_last_name = "LastName"
+            # 生成导入账号的姓名。
+            generated_first_name, generated_last_name = generate_account_name(name_locale)
             # 组装要写入数据库的账号记录。
             record = UserRecord(
                 email_account=item.email_account,
@@ -351,4 +362,3 @@ class AccountFileImporter:
             validation_errors=[],
             insert_errors=insert_errors,
         )
-

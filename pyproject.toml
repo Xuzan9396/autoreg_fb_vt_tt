@@ -15,6 +15,9 @@ dependencies = [
     "cryptography>=46.0.5",
     "faker>=40.5.1",
     "openpyxl>=3.1.5",
+    "paddlepaddle>=3.2.0",
+    "paddleocr==2.7.3",
+    "standard-imghdr>=3.13.0",
 ]
 
 # --- 核心魔法区域 ---

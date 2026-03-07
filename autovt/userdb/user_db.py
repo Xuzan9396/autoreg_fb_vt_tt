@@ -54,10 +54,26 @@ SETTING_FB_DEL_NUM_KEY = "setting_fb_del_num"
 SETTING_FB_DEL_NUM_DESC = "0 不清理，其他数字每隔第几次执行设置页 Facebook 账号清理"
 # 定义设置页 Facebook 账号清理控制默认值为 0（不执行设置页清理）。
 SETTING_FB_DEL_NUM_DEFAULT = "0"
+# 定义代理开始位置配置 key 常量。
+PROXYIP_START_NUM_KEY = "proxyip_start_num"
+# 定义代理开始位置配置描述文案常量。
+PROXYIP_START_NUM_DESC = "代理开始位置：范围 1 到 5，填写 1 表示索引 0"
+# 定义代理开始位置默认值为 1（表示索引 0）。
+PROXYIP_START_NUM_DEFAULT = "1"
+# 定义代理结束位置配置 key 常量。
+PROXYIP_END_NUM_KEY = "proxyip_end_num"
+# 定义代理结束位置配置描述文案常量。
+PROXYIP_END_NUM_DESC = "代理结束位置：范围 1 到 5，且必须大于等于代理开始位置"
+# 定义代理结束位置默认值为 1（表示索引 0）。
+PROXYIP_END_NUM_DEFAULT = "1"
 # 定义状态重试次数最小值（0=不重试）。
 STATUS_23_RETRY_MIN = 0
 # 定义状态重试次数最大值（5=最多重试 5 次）。
 STATUS_23_RETRY_MAX = 5
+# 定义代理点击范围最小值（1 表示索引 0）。
+PROXYIP_NUM_MIN = 1
+# 定义代理点击范围最大值（5 表示最多第 5 个位置）。
+PROXYIP_NUM_MAX = 5
 # 定义 Facebook 删除控制最小值（0=不删除）。
 FB_DELETE_NUM_MIN = 0
 # 定义 Facebook 删除控制最大值（防止异常大值）。
@@ -428,6 +444,30 @@ class UserDB:
             (SETTING_FB_DEL_NUM_KEY, setting_fb_del_default_val, SETTING_FB_DEL_NUM_DESC, now_ts()),
         # SQL 执行结束。
         )
+        # 计算并校验代理开始位置默认值。
+        proxyip_start_default_val = self._normalize_config_value(PROXYIP_START_NUM_KEY, PROXYIP_START_NUM_DEFAULT)
+        # 插入代理开始位置默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (PROXYIP_START_NUM_KEY, proxyip_start_default_val, PROXYIP_START_NUM_DESC, now_ts()),
+        # SQL 执行结束。
+        )
+        # 计算并校验代理结束位置默认值。
+        proxyip_end_default_val = self._normalize_config_value(PROXYIP_END_NUM_KEY, PROXYIP_END_NUM_DEFAULT)
+        # 插入代理结束位置默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (PROXYIP_END_NUM_KEY, proxyip_end_default_val, PROXYIP_END_NUM_DESC, now_ts()),
+        # SQL 执行结束。
+        )
 
     # 定义配置值标准化方法，并做 key 级别校验。
     def _normalize_config_value(self, key: str, val: str) -> str:
@@ -521,6 +561,46 @@ class UserDB:
                 raise ValueError(f"setting_fb_del_num 超出范围，必须在 {FB_DELETE_NUM_MIN} 到 {FB_DELETE_NUM_MAX} 之间")
             # 返回标准化后的整数文本。
             return str(setting_fb_del_num)
+        # 针对代理开始位置配置执行 1~5 范围校验。
+        if key == PROXYIP_START_NUM_KEY:
+            # 空值直接判定为非法。
+            if raw_value == "":
+                # 抛出明确错误提示。
+                raise ValueError("proxyip_start_num 不能为空，需填写 1 到 5 的整数")
+            # 尝试把输入值解析为整数。
+            try:
+                # 转成整数做范围检查。
+                proxyip_start_num = int(raw_value)
+            # 非整数输入直接报错。
+            except ValueError as exc:
+                # 抛出明确错误提示。
+                raise ValueError("proxyip_start_num 必须是整数，范围 1 到 5") from exc
+            # 范围不在允许区间时判定为非法。
+            if not PROXYIP_NUM_MIN <= proxyip_start_num <= PROXYIP_NUM_MAX:
+                # 抛出范围错误提示。
+                raise ValueError(f"proxyip_start_num 超出范围，必须在 {PROXYIP_NUM_MIN} 到 {PROXYIP_NUM_MAX} 之间")
+            # 返回标准化后的整数文本。
+            return str(proxyip_start_num)
+        # 针对代理结束位置配置执行 1~5 范围校验。
+        if key == PROXYIP_END_NUM_KEY:
+            # 空值直接判定为非法。
+            if raw_value == "":
+                # 抛出明确错误提示。
+                raise ValueError("proxyip_end_num 不能为空，需填写 1 到 5 的整数")
+            # 尝试把输入值解析为整数。
+            try:
+                # 转成整数做范围检查。
+                proxyip_end_num = int(raw_value)
+            # 非整数输入直接报错。
+            except ValueError as exc:
+                # 抛出明确错误提示。
+                raise ValueError("proxyip_end_num 必须是整数，范围 1 到 5") from exc
+            # 范围不在允许区间时判定为非法。
+            if not PROXYIP_NUM_MIN <= proxyip_end_num <= PROXYIP_NUM_MAX:
+                # 抛出范围错误提示。
+                raise ValueError(f"proxyip_end_num 超出范围，必须在 {PROXYIP_NUM_MIN} 到 {PROXYIP_NUM_MAX} 之间")
+            # 返回标准化后的整数文本。
+            return str(proxyip_end_num)
         # 其他 key 当前不做额外规则，直接返回清理后文本。
         return raw_value
 
@@ -1520,6 +1600,14 @@ class UserDB:
             elif key_value == SETTING_FB_DEL_NUM_KEY:
                 # 采用默认描述文案。
                 desc_value = SETTING_FB_DEL_NUM_DESC
+            # 代理开始位置配置使用固定默认描述。
+            elif key_value == PROXYIP_START_NUM_KEY:
+                # 采用默认描述文案。
+                desc_value = PROXYIP_START_NUM_DESC
+            # 代理结束位置配置使用固定默认描述。
+            elif key_value == PROXYIP_END_NUM_KEY:
+                # 采用默认描述文案。
+                desc_value = PROXYIP_END_NUM_DESC
 
         # 生成本次写入更新时间戳。
         update_time = now_ts()

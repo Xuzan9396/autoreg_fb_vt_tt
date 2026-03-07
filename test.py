@@ -232,7 +232,8 @@ def run_target_method(task: OpenSettingsTask, method_name: str) -> None:
         # 读取第2个参数作为 mode_index，默认 0（动态）。
         mode_index = parse_int_arg(2, 0)
         # 执行指定模式。
-        task.nekobox_run_all(mode_index)
+        # task.nekobox_run_all(mode_index)
+        task.nekobox_run_all()
         # 当前分支结束后返回。
         return
     raise RuntimeError(

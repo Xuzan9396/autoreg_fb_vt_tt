@@ -209,3 +209,4 @@ print(row)
 ```bash
 uv run python -m unittest -v tests/test_user_db.py
 ```
+

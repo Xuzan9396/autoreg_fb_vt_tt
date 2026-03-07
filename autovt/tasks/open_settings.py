@@ -55,6 +55,12 @@ from autovt.tasks.task_context import TaskContext
 # 导入用户数据库封装，供任务结束后回写账号状态。
 from autovt.userdb.user_db import FB_DELETE_NUM_MAX
 from autovt.userdb.user_db import FB_DELETE_NUM_MIN
+from autovt.userdb.user_db import PROXYIP_END_NUM_DEFAULT
+from autovt.userdb.user_db import PROXYIP_END_NUM_KEY
+from autovt.userdb.user_db import PROXYIP_NUM_MAX
+from autovt.userdb.user_db import PROXYIP_NUM_MIN
+from autovt.userdb.user_db import PROXYIP_START_NUM_DEFAULT
+from autovt.userdb.user_db import PROXYIP_START_NUM_KEY
 from autovt.userdb.user_db import SETTING_FB_DEL_NUM_DEFAULT
 from autovt.userdb.user_db import SETTING_FB_DEL_NUM_KEY
 from autovt.userdb.user_db import UserDB
@@ -129,6 +135,12 @@ class OpenSettingsTask:
         self.fb_delete_num = self._read_fb_delete_num()
         # 从 t_config 读取设置页 Facebook 账号清理控制（0=不清理，>0=按周期清理）。
         self.setting_fb_del_num = self._read_setting_fb_del_num()
+        # 从 t_config 读取代理开始位置配置（1~5）。
+        self.proxyip_start_num = self._read_proxyip_start_num()
+        # self.proxyip_start_num = 1
+        # 从 t_config 读取代理结束位置配置（1~5）。
+        self.proxyip_end_num = self._read_proxyip_end_num()
+        # self.proxyip_end_num = 5
         # 保存每次等待控件出现的最大秒数。
         self.mojiwang_wait_timeout_sec = 5.0
         # 创建用户数据库对象，供注册成功/失败后统一更新状态。
@@ -225,6 +237,105 @@ class OpenSettingsTask:
             return FB_DELETE_NUM_MAX
         # 返回合法配置值。
         return parsed_value
+
+    # 定义“读取代理开始位置配置”的方法。
+    def _read_proxyip_start_num(self) -> int:
+        # 从配置映射读取 proxyip_start_num，缺失时回退默认值 1。
+        raw_value = str(self.config_map.get(PROXYIP_START_NUM_KEY, PROXYIP_START_NUM_DEFAULT)).strip()
+        # 尝试解析整数。
+        try:
+            # 转成整数后统一做边界保护。
+            parsed_value = int(raw_value)
+        # 非法值时回退默认值 1。
+        except Exception:
+            # 返回默认值 1。
+            return int(PROXYIP_START_NUM_DEFAULT)
+        # 小于最小值时回退到最小值。
+        if parsed_value < PROXYIP_NUM_MIN:
+            # 返回最小值。
+            return PROXYIP_NUM_MIN
+        # 大于最大值时截断到最大值。
+        if parsed_value > PROXYIP_NUM_MAX:
+            # 返回最大值。
+            return PROXYIP_NUM_MAX
+        # 返回合法配置值。
+        return parsed_value
+
+    # 定义“读取代理结束位置配置”的方法。
+    def _read_proxyip_end_num(self) -> int:
+        # 从配置映射读取 proxyip_end_num，缺失时回退默认值 1。
+        raw_value = str(self.config_map.get(PROXYIP_END_NUM_KEY, PROXYIP_END_NUM_DEFAULT)).strip()
+        # 尝试解析整数。
+        try:
+            # 转成整数后统一做边界保护。
+            parsed_value = int(raw_value)
+        # 非法值时回退默认值 1。
+        except Exception:
+            # 返回默认值 1。
+            return int(PROXYIP_END_NUM_DEFAULT)
+        # 小于最小值时回退到最小值。
+        if parsed_value < PROXYIP_NUM_MIN:
+            # 返回最小值。
+            return PROXYIP_NUM_MIN
+        # 大于最大值时截断到最大值。
+        if parsed_value > PROXYIP_NUM_MAX:
+            # 返回最大值。
+            return PROXYIP_NUM_MAX
+        # 返回合法配置值。
+        return parsed_value
+
+    # 定义“为 Nekobox 模式节点计算安全随机索引”的方法。
+    def _resolve_safe_proxy_mode_index(self, total_modes: int) -> int | None:
+        # 没有任何模式节点时直接返回空，交给调用方按失败处理。
+        if total_modes <= 0:
+            # 记录错误日志。
+            self.log.error("Nekobox 配置列表为空，无法选择代理模式", package=self.nekobox_package, total_modes=total_modes)
+            # 返回 None 表示无法得到可用索引。
+            return None
+        # 读取配置中的开始位置。
+        start_num = int(self.proxyip_start_num)
+        # 读取配置中的结束位置。
+        end_num = int(self.proxyip_end_num)
+        # 反向区间时自动交换，避免异常配置导致全流程失败。
+        if start_num > end_num:
+            # 记录告警日志。
+            self.log.warning(
+                "代理点击范围配置反向，已自动交换开始和结束位置",
+                package=self.nekobox_package,
+                proxyip_start_num=start_num,
+                proxyip_end_num=end_num,
+            )
+            # 交换开始和结束位置。
+            start_num, end_num = end_num, start_num
+        # 转成 0-based 起始索引。
+        configured_start_index = max(0, start_num - 1)
+        # 转成 0-based 结束索引。
+        configured_end_index = max(0, end_num - 1)
+        # 计算当前模式节点可用的最大索引。
+        max_available_index = total_modes - 1
+        # 把起始索引压到可用范围内。
+        safe_start_index = min(configured_start_index, max_available_index)
+        # 把结束索引压到可用范围内。
+        safe_end_index = min(configured_end_index, max_available_index)
+        # 压缩后若起始索引仍大于结束索引，则回退到结束索引。
+        if safe_start_index > safe_end_index:
+            # 把起始索引对齐到结束索引，保证 random 范围合法。
+            safe_start_index = safe_end_index
+        # 在最终安全范围内随机一个模式索引。
+        selected_mode_index = random.randint(safe_start_index, safe_end_index)
+        # 记录本轮实际使用的模式索引，便于排查越界和范围收缩。
+        self.log.info(
+            "已解析 Nekobox 代理点击索引",
+            package=self.nekobox_package,
+            proxyip_start_num=start_num,
+            proxyip_end_num=end_num,
+            total_modes=total_modes,
+            safe_start_index=safe_start_index,
+            safe_end_index=safe_end_index,
+            selected_mode_index=selected_mode_index,
+        )
+        # 返回安全随机后的 0-based 索引。
+        return selected_mode_index
 
     # 定义“判断本轮是否需要执行 Facebook 重装”的方法。
     def _should_delete_fb_this_loop(self) -> bool:
@@ -1072,9 +1183,6 @@ class OpenSettingsTask:
         self._safe_clear_app(self.vinted_package)
         # 先停止插件应用，避免脏状态残留。
         self._safe_stop_app(self.mojiwang_packge)
-        # stop_app(self.nekobox_package)
-        # 记录插件应用停止成功。
-        # self.log.info("已停止应用", package=self.nekobox_package)
         #
         self._safe_stop_app(self.facebook_package)
         sleep(0.5)
@@ -2039,10 +2147,8 @@ class OpenSettingsTask:
         self.log.info("任务结束，已停止应用", package=self.mojiwang_packge)
 
     # 定义 Nekobox 全流程方法（带 defer 风格收尾）。
-    def nekobox_run_all(self, mode_index: int) -> None:
-        """
-        :param mode_index: 0=动态，1=移动
-        """
+    def nekobox_run_all(self, mode_index: int | None = None) -> bool:
+
         # 从当前任务实例中拿到可用的 Poco 对象。
         poco = self._require_poco()
         # 稍等 1 秒，避免紧接上一步操作导致界面状态不稳定。
@@ -2062,7 +2168,7 @@ class OpenSettingsTask:
                 # 记录错误日志。
                 self.log.error("未找到 Nekobox 模式选择父节点，无法继续", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
+                return False
             # 取到 group_tab 下一层所有可点击子节点（订阅/移动等）。
             tab_children = parent.children()
             # 至少需要两个分组节点才满足后续点击。
@@ -2070,13 +2176,13 @@ class OpenSettingsTask:
                 # 记录错误日志。
                 self.log.error("Nekobox 订阅和代理找不到,至少 2 个分组，订阅放第一个，移动和动态放第二个分组", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
+                return False
             # 点击第二个分组（索引从 0 开始，1 表示第二个）。
             if not self._safe_click(tab_children[1], "Nekobox 第二分组", sleep_interval=1):
                 # 点击失败时记录错误并结束本轮，避免后续链路连锁失败。
                 self.log.error("点击 Nekobox 第二分组失败，结束本轮", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
+                return False
             # 定位配置列表容器。
             parent = poco("android.widget.FrameLayout").child("android.widget.LinearLayout").offspring("moe.nb4a:id/fragment_holder").offspring("moe.nb4a:id/configuration_list").child("moe.nb4a:id/content")
             # 安全等待配置列表父节点，避免连接波动时直接崩溃。
@@ -2084,21 +2190,37 @@ class OpenSettingsTask:
                 # 记录错误日志。
                 self.log.error("未找到 Nekobox 配置列表父节点，无法继续", package=self.nekobox_package)
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
+                return False
             # 取配置列表下一层的模式节点集合。
             mode_children = parent.children()
-            # 校验入参索引不越界（支持 0/1 或更多模式）。
-            if len(mode_children) <= mode_index:
+            # 一个模式节点都没有时直接按失败返回，避免后续索引越界。
+            if len(mode_children) == 0:
+                # 记录空列表错误日志。
+                self.log.error("Nekobox 模式节点为空，无法继续", package=self.nekobox_package)
+                # 本轮提前结束，finally 仍会执行收尾。
+                return False
+            # 未传入固定索引时，按配置范围安全随机一个模式索引。
+            if mode_index is None:
+                # 计算当前轮安全随机后的模式索引。
+                mode_index = self._resolve_safe_proxy_mode_index(len(mode_children))
+            # 没有得到可用索引时按失败返回。
+            if mode_index is None:
+                # 记录错误日志。
+                self.log.error("Nekobox 模式索引解析失败，结束本轮", package=self.nekobox_package, total=len(mode_children))
+                # 本轮提前结束，finally 仍会执行收尾。
+                return False
+            # 传入固定索引时仍做一次硬保护，避免调试调用越界。
+            if mode_index < 0 or mode_index >= len(mode_children):
                 # 记录越界错误日志。
                 self.log.error("Nekobox 模式索引越界", package=self.nekobox_package, mode_index=mode_index, total=len(mode_children))
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
-            # 按入参索引点击目标模式节点。
+                return False
+            # 按最终安全索引点击目标模式节点。
             if not self._safe_click(mode_children[mode_index], f"Nekobox 模式节点-{mode_index}", sleep_interval=1):
                 # 点击失败时记录错误并结束本轮。
                 self.log.error("点击 Nekobox 模式节点失败，结束本轮", package=self.nekobox_package, mode_index=mode_index)
                 # 本轮提前结束，finally 仍会执行收尾。
-                return
+                return False
             # 判断 stats 节点是否存在。
             start_button_node = poco("android.widget.FrameLayout").child("android.widget.LinearLayout").offspring("moe.nb4a:id/stats")
             # 使用安全等待判断代理是否已经启动。
@@ -2123,6 +2245,8 @@ class OpenSettingsTask:
                     self.log.error("未找到代理启动按钮", package=self.nekobox_package)
             # 预留观察/生效等待时间，后续可按需要调整。
             sleep(2)
+            # 主流程走到这里视为 Nekobox 步骤成功完成。
+            return True
         # 无论 try 内成功、return 或抛异常，都会执行这里。
         finally:
             # 强制停止 Nekobox，保证流程收尾一致。
@@ -3109,8 +3233,8 @@ class OpenSettingsTask:
             self.clear_all()
             # 执行抹机王完整循环动作。
             self.mojiwang_run_all()
-            # 执行代理流程（0=动态，1=移动）。
-            self.nekobox_run_all(0)
+            # 执行代理流程（根据配置范围安全随机选择代理模式）。
+            self.nekobox_run_all()
             # 执行 Facebook 全流程，并返回是否成功完成。
             facebook_ok = self.facebook_run_all()
         # 捕获所有异常并转换为可落库的失败原因。

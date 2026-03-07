@@ -32,6 +32,14 @@ FB_DELETE_NUM_DESC = "0 不删除，其他数字每隔第几次重装"
 SETTING_FB_DEL_NUM_KEY = "setting_fb_del_num"
 # 定义设置页 Facebook 账号清理控制描述文案。
 SETTING_FB_DEL_NUM_DESC = "0 不清理，其他数字每隔第几次执行设置页 Facebook 账号清理"
+# 定义代理开始位置配置 key。
+PROXYIP_START_NUM_KEY = "proxyip_start_num"
+# 定义代理开始位置配置描述文案。
+PROXYIP_START_NUM_DESC = "代理开始位置：范围 1 到 5，填写 1 表示索引 0"
+# 定义代理结束位置配置 key。
+PROXYIP_END_NUM_KEY = "proxyip_end_num"
+# 定义代理结束位置配置描述文案。
+PROXYIP_END_NUM_DESC = "代理结束位置：范围 1 到 5，且必须大于等于代理开始位置"
 
 
 # ── 数据类 ────────────────────────────────────────────────────────────────
