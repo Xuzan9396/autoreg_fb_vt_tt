@@ -72,8 +72,8 @@ STATUS_23_RETRY_MIN = 0
 STATUS_23_RETRY_MAX = 5
 # 定义代理点击范围最小值（1 表示索引 0）。
 PROXYIP_NUM_MIN = 1
-# 定义代理点击范围最大值（5 表示最多第 5 个位置）。
-PROXYIP_NUM_MAX = 5
+# 定义代理点击范围最大值（5 表示最多第 6 个位置）。
+PROXYIP_NUM_MAX = 6
 # 定义 Facebook 删除控制最小值（0=不删除）。
 FB_DELETE_NUM_MIN = 0
 # 定义 Facebook 删除控制最大值（防止异常大值）。
@@ -588,7 +588,7 @@ class UserDB:
             # 非整数输入直接报错。
             except ValueError as exc:
                 # 抛出明确错误提示。
-                raise ValueError("proxyip_start_num 必须是整数，范围 1 到 5") from exc
+                raise ValueError("proxyip_start_num 必须是整数，范围 1 到 6") from exc
             # 范围不在允许区间时判定为非法。
             if not PROXYIP_NUM_MIN <= proxyip_start_num <= PROXYIP_NUM_MAX:
                 # 抛出范围错误提示。
@@ -1523,6 +1523,49 @@ class UserDB:
                 f"DELETE FROM {TABLE_NAME} WHERE id = ?;",
                 # 传入要删除的 id 参数。
                 (safe_user_id,),
+            # SQL 执行结束。
+            )
+        # 返回删除受影响行数。
+        return int(cursor.rowcount)
+
+    # 定义按 id 列表批量删除账号方法，返回受影响行数。
+    def delete_users_by_ids(self, user_ids: list[int]) -> int:
+        # 初始化去重后的安全 id 列表。
+        safe_user_ids: list[int] = []
+        # 初始化已见 id 集合，避免重复删除同一条记录。
+        seen_user_ids: set[int] = set()
+        # 遍历外部传入的 id 列表。
+        for user_id in user_ids:
+            # 把当前 id 转成整数。
+            safe_user_id = int(user_id)
+            # 非法 id 直接抛错，避免误删。
+            if safe_user_id <= 0:
+                # 抛出明确错误提示。
+                raise ValueError("user_ids 中存在小于等于 0 的非法账号 ID")
+            # 已经收录过的 id 直接跳过，避免重复拼接 SQL 参数。
+            if safe_user_id in seen_user_ids:
+                # 继续处理下一个 id。
+                continue
+            # 把当前 id 加入已见集合。
+            seen_user_ids.add(safe_user_id)
+            # 把当前 id 追加到最终删除列表。
+            safe_user_ids.append(safe_user_id)
+        # 没有任何合法 id 时直接返回 0。
+        if not safe_user_ids:
+            # 返回 0 表示本次没有删除任何记录。
+            return 0
+        # 按实际数量生成 SQL 占位符字符串。
+        placeholders = ",".join(["?"] * len(safe_user_ids))
+        # 获取可用连接。
+        conn = self.connect()
+        # 使用事务上下文执行批量删除。
+        with conn:
+            # 执行按 id 集合批量删除 SQL。
+            cursor = conn.execute(
+                # 删除命中 id 列表的账号记录。
+                f"DELETE FROM {TABLE_NAME} WHERE id IN ({placeholders});",
+                # 传入全部安全 id 参数。
+                tuple(safe_user_ids),
             # SQL 执行结束。
             )
         # 返回删除受影响行数。

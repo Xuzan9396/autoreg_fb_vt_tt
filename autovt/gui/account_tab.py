@@ -60,6 +60,12 @@ class AccountTab:
         # ── UI 控件占位 ──
         self.summary_text: ft.Text | None = None
         self.last_refresh_text: ft.Text | None = None
+        # 保存“全选当前页”复选框引用，便于刷新和批量操作时统一更新状态。
+        self.select_current_page_checkbox: ft.Checkbox | None = None
+        # 保存“删除全部”按钮引用，便于根据勾选结果动态禁用或启用。
+        self.delete_selected_button: ft.OutlinedButton | None = None
+        # 保存“已选数量”文本引用，便于提示当前页选中了多少条账号。
+        self.selected_count_text: ft.Text | None = None
         self.list_column: ft.Column | None = None
         self.search_input: ft.TextField | None = None
         self.status_filter_dropdown: ft.Dropdown | None = None
@@ -95,6 +101,12 @@ class AccountTab:
         self._active_dialog_title = ""
         self._active_dialog_trace_id: str | None = None
         self._dialog_open_seq = 0
+        # 缓存当前页快照数据，便于“全选当前页”后重绘复选框状态。
+        self._current_page_rows: list[dict[str, Any]] = []
+        # 缓存当前页账号 id 列表，便于批量删除只作用在当前页。
+        self._current_page_user_ids: list[int] = []
+        # 缓存当前页已勾选账号 id 集合，便于批量删除时快速取值。
+        self._selected_user_ids: set[int] = set()
 
     # ═══════════════════════════════════════════════════════════════════
     # 构建 Tab 内容
@@ -104,6 +116,24 @@ class AccountTab:
         """构建账号列表 Tab 的全部 UI。"""
         self.summary_text = ft.Text(value="账号总数: 0", size=14, weight=ft.FontWeight.W_600, color=ft.Colors.BLUE_GREY_900)
         self.last_refresh_text = ft.Text(value="最近刷新: -", size=12, color=ft.Colors.BLUE_GREY_600)
+        # 创建“全选当前页”复选框，默认禁用，待列表渲染后再放开。
+        self.select_current_page_checkbox = ft.Checkbox(
+            label="全选当前页",
+            value=False,
+            disabled=True,
+            on_change=self._toggle_select_current_page,
+        )
+        # 创建“删除全部”按钮，实际只删除当前页已勾选账号。
+        self.delete_selected_button = ft.OutlinedButton(
+            "删除全部",
+            icon=ft.Icons.DELETE_SWEEP,
+            disabled=True,
+            tooltip="删除当前页已勾选账号",
+            on_click=self._confirm_delete_selected_current_page,
+            style=ft.ButtonStyle(color=ft.Colors.RED_700),
+        )
+        # 创建“已选数量”文本，便于用户确认批量操作范围。
+        self.selected_count_text = ft.Text(value="已选: 0", size=12, color=ft.Colors.BLUE_GREY_700)
         self.list_column = ft.Column(
             controls=[ft.Text("账号列表待加载...", color=ft.Colors.BLUE_GREY_600)],
             spacing=10,
@@ -222,6 +252,16 @@ class AccountTab:
             alignment=ft.MainAxisAlignment.END,
             spacing=8,
         )
+        # 创建当前页批量选择工具栏，放在摘要下方，便于靠近列表操作。
+        current_page_batch_actions = ft.Row(
+            controls=[
+                self.select_current_page_checkbox,
+                self.delete_selected_button,
+                self.selected_count_text,
+            ],
+            spacing=12,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
         return ft.Column(
             controls=[
@@ -229,6 +269,7 @@ class AccountTab:
                 problem_reset_hint,
                 filters,
                 ft.Row([self.summary_text, self.last_refresh_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                current_page_batch_actions,
                 ft.Divider(height=1, color=ft.Colors.BLUE_GREY_100),
                 ft.Container(
                     expand=True, padding=12, border_radius=12,
@@ -477,12 +518,161 @@ class AccountTab:
     # ═══════════════════════════════════════════════════════════════════
 
     def _render_rows(self, rows: list[dict[str, Any]]) -> None:
+        # 列表容器尚未初始化时直接返回，避免空引用异常。
         if not self.list_column:
             return
-        if not rows:
+        # 缓存当前页原始行数据，便于批量全选时重建卡片。
+        self._current_page_rows = [dict(row) for row in rows]
+        # 重置当前页账号 id 列表，避免残留旧页数据。
+        self._current_page_user_ids = []
+        # 清空当前页勾选状态，避免翻页或刷新后误删。
+        self._selected_user_ids.clear()
+        # 遍历当前页数据，提取安全账号 id。
+        for row in self._current_page_rows:
+            # 把账号 id 转成整数，统一后续比较逻辑。
+            user_id = int(row.get("id", 0) or 0)
+            # 仅收录合法账号 id，避免批量删除拼进脏数据。
+            if user_id > 0:
+                # 追加到当前页账号 id 列表。
+                self._current_page_user_ids.append(user_id)
+        # 根据最新快照重建账号卡片。
+        self._rebuild_current_page_cards()
+        # 同步顶部批量操作控件状态。
+        self._sync_current_page_selection_controls()
+
+    def _rebuild_current_page_cards(self) -> None:
+        # 列表容器尚未初始化时直接返回，避免空引用异常。
+        if not self.list_column:
+            return
+        # 当前页没有账号时展示空态提示。
+        if not self._current_page_rows:
+            # 渲染空列表文案，提示用户当前没有数据。
             self.list_column.controls = [ft.Text("当前没有账号数据，请先写入 t_user。", color=ft.Colors.BLUE_GREY_700)]
             return
-        self.list_column.controls = [self._build_card(row) for row in rows]
+        # 逐条构建当前页卡片控件。
+        self.list_column.controls = [self._build_card(row) for row in self._current_page_rows]
+
+    def _get_selected_current_page_user_ids(self) -> list[int]:
+        # 初始化当前页已选账号 id 列表。
+        selected_user_ids: list[int] = []
+        # 遍历当前页账号 id，保证批量删除范围不越过当前页。
+        for user_id in self._current_page_user_ids:
+            # 当前 id 已勾选时收录到结果中。
+            if user_id in self._selected_user_ids:
+                # 追加当前页已选 id。
+                selected_user_ids.append(user_id)
+        # 返回当前页已选账号 id 列表。
+        return selected_user_ids
+
+    def _sync_current_page_selection_controls(self) -> None:
+        # 读取当前页已选账号 id 列表。
+        selected_user_ids = self._get_selected_current_page_user_ids()
+        # 计算当前页账号总数。
+        current_page_count = len(self._current_page_user_ids)
+        # 计算当前页已选账号总数。
+        selected_count = len(selected_user_ids)
+        # 同步“全选当前页”复选框状态。
+        if self.select_current_page_checkbox:
+            # 当前页没有数据时禁用复选框，避免无意义点击。
+            self.select_current_page_checkbox.disabled = current_page_count <= 0
+            # 仅当当前页全部被勾选时才把全选框置为选中。
+            self.select_current_page_checkbox.value = current_page_count > 0 and selected_count == current_page_count
+        # 同步“删除全部”按钮状态。
+        if self.delete_selected_button:
+            # 只有当前页至少勾选一条账号时才允许批量删除。
+            self.delete_selected_button.disabled = selected_count <= 0
+        # 同步“已选数量”文本状态。
+        if self.selected_count_text:
+            # 更新当前页已选数量展示。
+            self.selected_count_text.value = f"已选: {selected_count}"
+            # 有勾选时改用强调色，方便用户发现自己选中了账号。
+            if selected_count > 0:
+                # 切换为警示色，提示这是待删除对象数量。
+                self.selected_count_text.color = ft.Colors.RED_700
+            # 没有勾选时恢复中性色。
+            else:
+                # 恢复默认中性色，降低视觉噪音。
+                self.selected_count_text.color = ft.Colors.BLUE_GREY_700
+
+    def _toggle_select_current_page(self, _e: ft.ControlEvent | None = None) -> None:
+        try:
+            # 读取当前页账号 id 列表。
+            current_page_user_ids = list(self._current_page_user_ids)
+            # 当前页没有数据时直接清空状态并返回。
+            if not current_page_user_ids:
+                # 清空当前页勾选集合，避免残留脏状态。
+                self._selected_user_ids.clear()
+                # 同步顶部批量操作控件状态。
+                self._sync_current_page_selection_controls()
+                # 刷新页面，确保控件视觉状态和内部状态一致。
+                self.page.update()
+                return
+            # 读取复选框目标状态。
+            should_select_all = bool(self.select_current_page_checkbox.value) if self.select_current_page_checkbox else False
+            # 需要全选时直接覆盖为当前页全部账号 id。
+            if should_select_all:
+                # 当前页全部账号都加入已选集合。
+                self._selected_user_ids = set(current_page_user_ids)
+            # 需要取消全选时清空当前页选择集合。
+            else:
+                # 清空当前页所有勾选。
+                self._selected_user_ids.clear()
+            # 记录当前页全选切换日志，便于排查误删范围。
+            log.info(
+                "切换当前页全选状态",
+                page_index=self._page_index,
+                should_select_all=should_select_all,
+                current_page_count=len(current_page_user_ids),
+                selected_count=len(self._selected_user_ids),
+            )
+            # 按最新勾选结果重建卡片，让每条账号复选框状态立即同步。
+            self._rebuild_current_page_cards()
+            # 同步顶部批量操作控件状态。
+            self._sync_current_page_selection_controls()
+            # 刷新页面，确保复选框和按钮状态立即生效。
+            self.page.update()
+        except Exception as exc:
+            # 记录当前页全选切换异常，便于定位 Flet 事件问题。
+            log.exception("切换当前页全选状态失败", page_index=self._page_index, error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"切换全选失败: {exc}")
+
+    def _toggle_single_user_selected(self, user_id: int, event: ft.ControlEvent | None = None) -> None:
+        # 把账号 id 转成整数，统一后续集合操作类型。
+        safe_user_id = int(user_id)
+        # 非法账号 id 直接提示并返回，避免污染已选集合。
+        if safe_user_id <= 0:
+            # 给用户返回可读错误提示。
+            self._show_snack("勾选失败：无效的账号 ID")
+            return
+        try:
+            # 读取当前行复选框目标状态。
+            is_selected = bool(event.control.value) if event and getattr(event, "control", None) is not None else safe_user_id not in self._selected_user_ids
+            # 目标状态为选中时加入已选集合。
+            if is_selected:
+                # 把当前账号加入当前页已选集合。
+                self._selected_user_ids.add(safe_user_id)
+            # 目标状态为未选中时从集合中移除。
+            else:
+                # 把当前账号从当前页已选集合中移除。
+                self._selected_user_ids.discard(safe_user_id)
+            # 记录单条账号勾选切换日志，便于回溯用户操作。
+            log.info(
+                "切换单个账号勾选状态",
+                page_index=self._page_index,
+                user_id=safe_user_id,
+                is_selected=is_selected,
+                selected_count=len(self._get_selected_current_page_user_ids()),
+            )
+            # 同步顶部批量操作控件状态。
+            self._sync_current_page_selection_controls()
+            # 刷新页面，确保顶部全选和删除按钮状态同步变化。
+            self.page.update()
+        except Exception as exc:
+            # 记录单条账号勾选异常栈，便于定位界面事件问题。
+            log.exception("切换单个账号勾选状态失败", page_index=self._page_index, user_id=safe_user_id, error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"勾选账号失败: {exc}")
 
     def _build_card(self, row: dict[str, Any]) -> ft.Control:
         row_data = dict(row)
@@ -531,8 +721,16 @@ class AccountTab:
             content=ft.Column(
                 controls=[
                     ft.Row(
-                        controls=[ft.Text(f"ID:{user_id} | {email_account or '-'}", size=15, weight=ft.FontWeight.W_600, expand=True)],
+                        controls=[
+                            ft.Checkbox(
+                                value=user_id in self._selected_user_ids,
+                                tooltip="勾选后可参与当前页批量删除",
+                                on_change=lambda e, uid=user_id: self._toggle_single_user_selected(uid, e),
+                            ),
+                            ft.Text(f"ID:{user_id} | {email_account or '-'}", size=15, weight=ft.FontWeight.W_600, expand=True),
+                        ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     ft.ResponsiveRow(
                         controls=[
@@ -1690,6 +1888,81 @@ class AccountTab:
     # 删除
     # ═══════════════════════════════════════════════════════════════════
 
+    def _confirm_delete_selected_current_page(self, _e: ft.ControlEvent | None = None) -> None:
+        # 读取当前页已勾选账号 id 列表。
+        selected_user_ids = self._get_selected_current_page_user_ids()
+        # 当前页没有勾选任何账号时直接提示并返回。
+        if not selected_user_ids:
+            # 给用户返回可读错误提示。
+            self._show_snack("请先勾选当前页要删除的账号。")
+            return
+        # 把当前页数据按 id 建立映射，便于生成确认文案。
+        row_map = {int(row.get("id", 0) or 0): row for row in self._current_page_rows}
+        # 初始化预览邮箱列表，避免确认弹窗过长。
+        preview_emails: list[str] = []
+        # 遍历当前页已选账号 id，提取前几条邮箱作为确认预览。
+        for user_id in selected_user_ids[:5]:
+            # 读取当前 id 对应的数据行。
+            row = row_map.get(user_id, {})
+            # 读取邮箱账号字段，不存在时回退占位文本。
+            email_account = str(row.get("email_account", "-")).strip() or "-"
+            # 追加到预览邮箱列表。
+            preview_emails.append(email_account)
+        # 生成预览文案，数量过多时附带省略提示。
+        preview_text = "、".join(preview_emails)
+        # 需要省略剩余账号时补充说明。
+        if len(selected_user_ids) > len(preview_emails):
+            # 已有邮箱预览时追加剩余数量提示，避免弹窗文本过长。
+            if preview_text:
+                # 在现有预览后追加总数量说明。
+                preview_text = f"{preview_text} 等 {len(selected_user_ids)} 条账号"
+            # 没有任何邮箱预览时直接回退为数量说明。
+            else:
+                # 使用总数量说明替代空白预览。
+                preview_text = f"共 {len(selected_user_ids)} 条账号"
+        # 没有可用邮箱预览时使用默认提示。
+        if not preview_text:
+            # 回退为数量说明，避免确认弹窗出现空白内容。
+            preview_text = f"共 {len(selected_user_ids)} 条账号"
+        # 构建批量删除确认弹窗。
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=self._build_dialog_title("批量删除当前页账号"),
+            content=ft.Text(f"确认删除当前页已选账号 {len(selected_user_ids)} 条？\n{preview_text}\n该操作不可恢复。"),
+            actions=[
+                ft.TextButton("取消", on_click=lambda e: self._close_dialog(e, source="batch_delete_cancel_button")),
+                ft.FilledButton(
+                    "确认删除",
+                    icon=ft.Icons.DELETE_FOREVER,
+                    on_click=lambda e, ids=list(selected_user_ids): self._delete_selected_current_page(ids),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            on_dismiss=self._on_dialog_dismiss,
+        )
+        # 生成批量删除弹窗追踪 id，便于日志串联。
+        dialog_trace_id = self._next_dialog_trace_id()
+        # 保存当前活动弹窗引用，便于后续显式关闭。
+        self._active_dialog = dialog
+        # 保存当前活动弹窗标题，便于日志定位。
+        self._active_dialog_title = "批量删除当前页账号"
+        # 保存当前活动弹窗追踪 id。
+        self._active_dialog_trace_id = dialog_trace_id
+        # 调起批量删除确认弹窗显示。
+        self.page.show_dialog(dialog)
+        # 强制刷新页面，避免“点击删除全部后弹窗延迟显示”。
+        self.page.update()
+        # 记录批量删除弹窗打开日志。
+        log.info(
+            "批量删除当前页账号弹窗已展示",
+            dialog_trace_id=dialog_trace_id,
+            dialog_title="批量删除当前页账号",
+            dialog_instance_id=hex(id(dialog)),
+            page_index=self._page_index,
+            selected_count=len(selected_user_ids),
+            selected_user_ids=selected_user_ids,
+        )
+
     def _confirm_delete(self, user_id: int, email_account: str) -> None:
         safe_id = int(user_id)
         if safe_id <= 0:
@@ -1740,3 +2013,59 @@ class AccountTab:
         except Exception as exc:
             log.exception("删除账号失败", user_id=safe_id)
             self._show_snack(f"删除账号失败: {exc}")
+
+    def _delete_selected_current_page(self, selected_user_ids: list[int]) -> None:
+        # 初始化安全账号 id 列表，避免重复删除同一条记录。
+        safe_user_ids: list[int] = []
+        # 初始化已见账号 id 集合，便于去重。
+        seen_user_ids: set[int] = set()
+        # 遍历外部传入的账号 id 列表。
+        for user_id in selected_user_ids:
+            # 把账号 id 转成整数。
+            safe_user_id = int(user_id)
+            # 非法账号 id 直接跳过，避免污染批量删除参数。
+            if safe_user_id <= 0:
+                # 继续处理下一个账号 id。
+                continue
+            # 已收录过的账号 id 直接跳过，避免重复删除。
+            if safe_user_id in seen_user_ids:
+                # 继续处理下一个账号 id。
+                continue
+            # 把当前账号 id 加入已见集合。
+            seen_user_ids.add(safe_user_id)
+            # 把当前账号 id 追加到安全删除列表。
+            safe_user_ids.append(safe_user_id)
+        # 清洗后没有可删除账号时直接提示并返回。
+        if not safe_user_ids:
+            # 给用户返回可读错误提示。
+            self._show_snack("批量删除失败：没有可删除的账号。")
+            return
+        try:
+            # 执行当前页已选账号批量删除。
+            affected = self.user_db.delete_users_by_ids(safe_user_ids)
+            # 先关闭批量删除确认弹窗。
+            self._dismiss_active_dialog(reason="batch_delete_success")
+            # 清空当前页已选集合，避免删除成功后残留旧状态。
+            self._selected_user_ids.clear()
+            # 同步顶部批量操作控件状态。
+            self._sync_current_page_selection_controls()
+            # 数据库未删除到任何记录时提示目标可能已经不存在。
+            if affected <= 0:
+                # 给用户返回可读错误提示。
+                self._show_snack("批量删除失败：目标账号不存在或已被删除。")
+                return
+            # 记录批量删除成功日志，便于追踪影响范围。
+            log.info(
+                "批量删除当前页账号完成",
+                page_index=self._page_index,
+                requested_count=len(safe_user_ids),
+                affected_rows=affected,
+                selected_user_ids=safe_user_ids,
+            )
+            # 弹窗关闭后异步刷新列表，确保页码和统计自动收敛。
+            self.page.run_task(self._refresh_after_dialog_close, "batch_delete", f"已删除 {affected} 条账号。")
+        except Exception as exc:
+            # 记录批量删除异常栈，便于定位数据库或页面刷新问题。
+            log.exception("批量删除当前页账号失败", page_index=self._page_index, selected_user_ids=safe_user_ids, error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"批量删除失败: {exc}")

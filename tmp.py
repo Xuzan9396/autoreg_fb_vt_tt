@@ -71,7 +71,7 @@ poco = AndroidUiautomationPoco(use_airtest_input=True, screenshot_each_action=Fa
 snapshot(msg="请填写测试点.")
 
 
-bools = poco("Cette Page n’est pas disponible pour le moment").exists()
+bools = poco("M’aider à me connecter").exists()
 print(f"当前状态是: {bools}")
 
 
@@ -87,6 +87,21 @@ poco("android.widget.Button").click()
 poco("android.view.View").click()
 
 poco(text="Create new account").click()
+
+
+poco("Mot de passe").click()
+poco("android.widget.FrameLayout").offspring("android:id/content").child("com.facebook.katana:id/(name removed)").child("com.facebook.katana:id/(name removed)").child("android.widget.FrameLayout").child("android.widget.FrameLayout").child("android.widget.FrameLayout")[1].child("android.widget.FrameLayout")[0].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").offspring("Retour").child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").click()
+
+poco(text="Suivant").click()
+
+poco("Mot de passe").click()
+
+
+poco("Créez un mot de passe").click()
+
+
+
+
 
 
 

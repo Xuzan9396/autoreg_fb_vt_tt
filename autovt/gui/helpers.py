@@ -14,8 +14,8 @@ LOGIN_USERNAME = "admin"
 LOGIN_PASSWORD = "123456"
 # 设备列表自动监控刷新间隔（秒），调大到 5 秒降低 adb 轮询压力。
 DEVICE_MONITOR_INTERVAL_SEC = 5.0
-# 账号列表每页条数（固定 20，和需求保持一致）。
-ACCOUNT_PAGE_SIZE = 20
+# 账号列表每页条数（固定 50，和最新需求保持一致）。
+ACCOUNT_PAGE_SIZE = 50
 MOJIWANG_RUN_NUM_KEY = "mojiwang_run_num"
 MOJIWANG_RUN_NUM_DESC = "抹机玩抹机次数: 1 到 100 填写值"
 STATUS_23_RETRY_MAX_KEY = "status_23_retry_max_num"
@@ -35,11 +35,11 @@ SETTING_FB_DEL_NUM_DESC = "0 不清理，其他数字每隔第几次执行设置
 # 定义代理开始位置配置 key。
 PROXYIP_START_NUM_KEY = "proxyip_start_num"
 # 定义代理开始位置配置描述文案。
-PROXYIP_START_NUM_DESC = "代理开始位置：范围 1 到 5，填写 1 表示索引 0"
+PROXYIP_START_NUM_DESC = "代理开始位置：范围 1 到 6，填写 1 表示索引 0"
 # 定义代理结束位置配置 key。
 PROXYIP_END_NUM_KEY = "proxyip_end_num"
 # 定义代理结束位置配置描述文案。
-PROXYIP_END_NUM_DESC = "代理结束位置：范围 1 到 5，且必须大于等于代理开始位置"
+PROXYIP_END_NUM_DESC = "代理结束位置：范围 1 到 6，且必须大于等于代理开始位置"
 
 
 # ── 数据类 ────────────────────────────────────────────────────────────────

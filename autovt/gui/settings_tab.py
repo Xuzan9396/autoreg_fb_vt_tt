@@ -128,7 +128,7 @@ class SettingsTab:
             # 设置输入框标签为简洁的开始位置说明。
             label="开始位置",
             # 设置输入提示文案。
-            hint_text="请输入 1 到 5 的整数",
+            hint_text="请输入 1 到 6 的整数",
             # 统一输入框宽度。
             width=160,
             # 使用数字键盘输入。
@@ -143,7 +143,7 @@ class SettingsTab:
             # 设置输入框标签为简洁的结束位置说明。
             label="结束位置",
             # 设置输入提示文案。
-            hint_text="请输入 1 到 5 的整数",
+            hint_text="请输入 1 到 6 的整数",
             # 统一输入框宽度。
             width=160,
             # 使用数字键盘输入。
@@ -297,7 +297,7 @@ class SettingsTab:
                 controls=[
                     # 使用单行说明展示代理范围规则，减少卡片头部高度。
                     ft.Text(
-                        "代理点击范围：范围 1 到 5，且开始位置不能大于结束位置。",
+                        "代理点击范围：范围 1 到 6，且开始位置不能大于结束位置。",
                         size=13,
                         color=ft.Colors.BLUE_GREY_700,
                     ),
@@ -375,13 +375,12 @@ class SettingsTab:
         self._sanitize_non_negative_int_input(self.setting_fb_del_num_value_input, "setting_fb_del_num")
 
     def _sanitize_proxyip_start_num_input(self, _e: ft.ControlEvent | None = None) -> None:
-        """软校验 proxyip_start_num 输入：允许清空，限制 1~5。"""
-        # 复用 1~5 输入清洗逻辑。
+        """软校验 proxyip_start_num 输入：允许清空，限制 1~6。"""
+        # 复用 16 输入清洗逻辑。
         self._sanitize_one_to_five_input(self.proxyip_start_num_value_input, "proxyip_start_num")
 
     def _sanitize_proxyip_end_num_input(self, _e: ft.ControlEvent | None = None) -> None:
         """软校验 proxyip_end_num 输入：允许清空，限制 1~5。"""
-        # 复用 1~5 输入清洗逻辑。
         self._sanitize_one_to_five_input(self.proxyip_end_num_value_input, "proxyip_end_num")
 
     def _sanitize_non_negative_int_input(self, input_control: ft.TextField | None, field_name: str) -> None:
@@ -428,7 +427,7 @@ class SettingsTab:
             log.exception("标准化非负整数输入框时刷新页面失败", field_name=field_name, error=str(exc))
 
     def _sanitize_one_to_five_input(self, input_control: ft.TextField | None, field_name: str) -> None:
-        """软校验 1~5 整数输入框：允许清空，限制 1 到 5。"""
+        """软校验 1~6 整数输入框：允许清空，限制 1 到 6。"""
         # 输入框未初始化时直接返回。
         if not input_control:
             return
@@ -448,7 +447,7 @@ class SettingsTab:
                 self.page.update()
             # 刷新失败时记录日志但不抛异常。
             except Exception as exc:
-                log.exception("清空 1~5 输入框时刷新页面失败", field_name=field_name, error=str(exc))
+                log.exception("清空 1~6 输入框时刷新页面失败", field_name=field_name, error=str(exc))
             return
         # 只保留数字字符，兼容粘贴场景。
         digit_chars = "".join(ch for ch in clean_value if ch.isdigit())
@@ -461,9 +460,9 @@ class SettingsTab:
             # 小于 1 时自动拉回到 1。
             if int(normalized_value) < 1:
                 normalized_value = "1"
-            # 大于 5 时自动截断到 5。
-            if int(normalized_value) > 5:
-                normalized_value = "5"
+            # 大于 6 时自动截断到 6。
+            if int(normalized_value) > 6:
+                normalized_value = "6"
         # 值未变化时无需更新，避免无效刷新。
         if normalized_value == input_control.value:
             return
@@ -474,7 +473,7 @@ class SettingsTab:
             self.page.update()
         # 刷新失败时记录日志，避免事件链路中断。
         except Exception as exc:
-            log.exception("标准化 1~5 输入框时刷新页面失败", field_name=field_name, error=str(exc))
+            log.exception("标准化 1~6 输入框时刷新页面失败", field_name=field_name, error=str(exc))
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新设置 Tab 数据。"""
@@ -702,10 +701,10 @@ class SettingsTab:
             self._show_snack("setting_fb_del_num 不能为空，请输入大于等于 0 的整数。")
             return
         if proxyip_start_num_raw_value == "":
-            self._show_snack("代理开始位置不能为空，请输入 1 到 5 的整数。")
+            self._show_snack("代理开始位置不能为空，请输入 1 到 6 的整数。")
             return
         if proxyip_end_num_raw_value == "":
-            self._show_snack("代理结束位置不能为空，请输入 1 到 5 的整数。")
+            self._show_snack("代理结束位置不能为空，请输入 1 到 6 的整数。")
             return
         # 尝试把代理范围配置解析为整数，便于保存前先做跨字段校验。
         try:
@@ -716,7 +715,7 @@ class SettingsTab:
         # 非整数时给出明确提示。
         except Exception:
             # 提示用户输入合法整数。
-            self._show_snack("代理开始位置和代理结束位置必须是 1 到 5 的整数。")
+            self._show_snack("代理开始位置和代理结束位置必须是 1 到 6 的整数。")
             return
         # 开始位置大于结束位置时禁止保存。
         if proxyip_start_num_value > proxyip_end_num_value:

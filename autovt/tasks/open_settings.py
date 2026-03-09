@@ -2631,22 +2631,33 @@ class OpenSettingsTask:
 
         self._safe_click(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), "提交邮箱下一页", sleep_interval=2)
 
+        # 这里判断是否有账号登录
 
-        # 定位密码输入框
-        facebook_input_password_node = poco(text=FACEBOOK_INPUT_PASSWORD[self.device_lang])
-        # 等待密码输入框出现。
+        if self._safe_wait_exists(poco(FACEBOOK_ACCOUNT_HELP[self.device_lang]), 5, "帮助登录的界面了"):
+            self._safe_click(poco(FACEBOOK_ACCOUNT_HELP[self.device_lang]), "帮助登录的界面了-点击", sleep_interval=2)
+
+            # if not self.poco_find_or_click(poco,"登录其他账号",  2):
+            #     # 记录错误日志，包含账号信息
+            #     self.log.error("未找到登录其他账号按钮", user_email=self.user_email)
+            #     # 步骤失败且重试后仍失败时，直接结束当前流程。
+            #     return False
+        # else:
+            # 定位密码输入框
+            # facebook_input_password_node = poco(text=FACEBOOK_INPUT_PASSWORD[self.device_lang])
+            # 等待密码输入框出现。
         if not _run_step_or_fail(
-            step_desc="等待密码输入框",
-            fail_reason="密码输入框未出现",
-            action=lambda: self._safe_wait_exists(facebook_input_password_node, 7, "密码输入框"),
+                step_desc="等待密码输入框",
+                fail_reason="密码输入框未出现",
+                action=lambda: self._safe_wait_exists(poco(text=FACEBOOK_INPUT_PASSWORD[self.device_lang]), 7, "密码输入框"),
         ):
             # 记录错误日志，包含账号信息
             self.log.error("密码输入框未出现，无法继续输入", user_email=self.user_email)
             # 步骤失败且重试后仍失败时，直接结束当前流程。
             return False
 
+
         # 点击密码输入框聚焦
-        self._safe_click(facebook_input_password_node,"密码输入框-点击聚焦", sleep_interval=1)
+        self._safe_click(poco(text=FACEBOOK_INPUT_PASSWORD[self.device_lang]),"密码输入框-点击聚焦", sleep_interval=1)
         # 向当前焦点输入密码。
         if not _run_step_or_fail(
             step_desc="输入 Facebook 密码",
@@ -2656,7 +2667,13 @@ class OpenSettingsTask:
             # 步骤失败且重试后仍失败时，直接结束当前流程。
             return False
 
+        # self.poco_find_or_click(nodes=[],"提交密码下一页")
         self._safe_click(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), "提交密码下一页", sleep_interval=2)
+
+        if self._safe_wait_exists(poco(text=FACEBOOK_CREATE_PASSWORD_PAGE[self.device_lang]), 5, "提交密码后帮助登录的界面了") and self._safe_wait_exists(poco(text=FACEBOOK_FIRST_LAST_NAME_NEXT[self.device_lang]), 5, "提交密码后帮助登录的界面了") :
+            for i in range(3):
+                if not  self._safe_click(poco(text=FACEBOOK_ACCOUNT_HELP[self.device_lang]), "提交密码后帮助登录的界面了-循环点击"+str(i), sleep_interval=2):
+                    break
 
         # 先判断接受按钮防止等待太久
         access_node = poco(text=FACEBOOK_FINAL_CREATE_USER_BUTTON[self.device_lang])
@@ -2681,6 +2698,11 @@ class OpenSettingsTask:
             self._safe_click(access_node, "创建账号按钮", sleep_interval=5)
         else:
             self._safe_click(access_node, "创建账号按钮v0", sleep_interval=5)
+            # 可能失败了再重试 3次
+            for i in range(3):
+                if not self._safe_wait_exists(poco(text=FACEBOOK_FINAL_CREATE_USER_BUTTON[self.device_lang]), 2, "创建账号按钮v0-循环确认"+str(i)):
+                    break
+                self._safe_click(poco(text=FACEBOOK_FINAL_CREATE_USER_BUTTON[self.device_lang]), "创建账号按钮v0-循环点击"+str(i), sleep_interval=2)
 
 
         if  self._safe_wait_exists(poco(text=FACEBOOK_REFRESH_FONT_BUTTON[self.device_lang]), 70, "再次刷新按钮"):

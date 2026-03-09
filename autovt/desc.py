@@ -29,9 +29,16 @@ FACEBOOK_SELECT_EMAIL_SIGN_UP = {"fr": "S’inscrire avec une adresse e-mail", "
 # Facebook 邮箱输入框文案映射（按语言）
 FACEBOOK_EMAIL_INPUT = {"fr": "Adresse e-mail", "en": ""}
 
+# 是否有账号帮我我登录
+FACEBOOK_ACCOUNT_HELP = {"fr": "M’aider à me connecter", "en": ""}
+
 # 设置登录密码
 # Facebook 密码输入框文案映射（按语言）
 FACEBOOK_INPUT_PASSWORD = {"fr": "Mot de passe", "en": ""}
+
+
+# Créez un mot de passe 是否在设置密码的页面
+FACEBOOK_CREATE_PASSWORD_PAGE = {"fr": "Créez un mot de passe", "en": ""}
 
 
 # 最后信息确认页面创建账号按钮
@@ -111,6 +118,7 @@ FACEBOOK_FINAL_CONFIRM_BUTTONV2 = {"fr": "Voir votre profil", "en": ""}
 
  # 是否注册了
 FACEBOOK_IS_REGISTERED_BUTTON = {"fr": "Oui, me connecter en tant.*", "en": ""}
+
 
 
 # 继续邮箱登录
