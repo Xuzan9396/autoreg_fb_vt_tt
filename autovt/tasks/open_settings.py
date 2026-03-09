@@ -3210,7 +3210,8 @@ class OpenSettingsTask:
                 break
 
 
-        self.log("Facebook 头像重新上传流程完成")
+        # 记录头像重新上传流程完成日志，避免把 logger 当函数调用导致直接抛异常。
+        self.log.info("Facebook 头像重新上传流程完成")
         return True
 
     # 定义“执行一轮完整任务”的公开方法。

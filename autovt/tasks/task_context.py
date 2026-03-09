@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 # 导入 Any 类型，支持 extras 承载动态扩展数据。
 from typing import Any
 
+# 定义运行期默认语言区域，避免设备语言读取失败时直接进入 unknown。
+DEFAULT_DEVICE_LOCALE = "en-US"
+# 定义运行期默认语言主码，和默认区域保持一致。
+DEFAULT_DEVICE_LANG = "en"
+
 
 # 使用 dataclass 定义上下文对象，便于后续持续扩展字段。
 @dataclass
@@ -29,13 +34,17 @@ class TaskContext:
     # 根据设备号和区域码创建上下文。
     def from_serial_locale(cls, serial: str, device_locale: str) -> "TaskContext":
         # 先规范 locale 字符串，避免空值和空格干扰。
-        locale = (device_locale or "unknown").strip()
-        # 对无效占位值统一降级为 unknown。
-        if not locale or locale.lower() in {"none", "null"}:
-            # 使用 unknown 作为统一兜底值。
-            locale = "unknown"
-        # 抽取语言主码，unknown 保持不变。
-        lang = locale.split("-", 1)[0].lower() if locale != "unknown" else "unknown"
+        locale = (device_locale or "").strip()
+        # 对无效占位值统一降级为默认语言区域。
+        if not locale or locale.lower() in {"none", "null", "unknown"}:
+            # 使用稳定默认值，避免任务层出现 unknown 索引失败。
+            locale = DEFAULT_DEVICE_LOCALE
+        # 抽取语言主码，异常场景回退默认语言主码。
+        lang = locale.split("-", 1)[0].lower() if "-" in locale else locale.lower()
+        # 语言主码为空时回退默认值，避免出现空字符串。
+        if lang == "":
+            # 使用默认语言主码作为兜底。
+            lang = DEFAULT_DEVICE_LANG
         # 返回构建完成的上下文对象。
         return cls(serial=serial, device_locale=locale, device_lang=lang)
 
@@ -47,12 +56,12 @@ class TaskContext:
         if not (self.serial or "").strip():
             # 记录缺失 serial。
             missing.append("serial")
-        # 语言区域为空或 unknown 时判定为缺失。
-        if not (self.device_locale or "").strip() or self.device_locale == "unknown":
+        # 语言区域为空时判定为缺失。
+        if not (self.device_locale or "").strip():
             # 记录缺失 device_locale。
             missing.append("device_locale")
-        # 语言主码为空或 unknown 时判定为缺失。
-        if not (self.device_lang or "").strip() or self.device_lang == "unknown":
+        # 语言主码为空时判定为缺失。
+        if not (self.device_lang or "").strip():
             # 记录缺失 device_lang。
             missing.append("device_lang")
         # 返回缺失字段列表。

@@ -35,6 +35,7 @@ class AutoVTGuiApp:
         self._logged_in = False
         self._monitor_running = True
         self._closing = False
+        self._action_running = False
 
         # ── 后端服务 ──
         self.manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
@@ -305,6 +306,26 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _run_action(self, action_name: str, fn: Callable[[], str | list[str]]) -> None:
+        # 已有后台动作执行中时直接提示，避免多个重操作并发打架。
+        if self._action_running:
+            # 给用户明确反馈，避免误以为当前点击无效。
+            self._show_snack("已有设备动作执行中，请等待当前操作完成。")
+            return
+        try:
+            # 标记当前已有后台动作执行中。
+            self._action_running = True
+            # 在后台任务中执行真正的重操作，避免阻塞 Flet 事件线程。
+            self.page.run_task(self._run_action_async, action_name, fn)
+        except Exception as exc:
+            # 调度失败时立即复位动作标记，避免后续按钮永久不可用。
+            self._action_running = False
+            # 记录调度异常，便于定位 Flet 任务调度问题。
+            log.exception("调度 GUI 动作任务失败", action=action_name, error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"{action_name} 失败: {exc}")
+
+    async def _run_action_async(self, action_name: str, fn: Callable[[], str | list[str]]) -> None:
+        """把设备重操作放到后台线程执行，避免卡住 GUI 主线程。"""
         # 记录动作总起点时间，用于输出总耗时。
         action_started_at = time.monotonic()
         # 先记一条开始日志，便于确认按钮点击事件已触发。
@@ -318,8 +339,8 @@ class AutoVTGuiApp:
         try:
             # 记录动作函数执行起点。
             fn_started_at = time.monotonic()
-            # 执行具体动作函数（如 start_all / stop_all / start_worker 等）。
-            result = fn()
+            # 把具体动作函数放到后台线程执行，避免 UI 主线程被阻塞。
+            result = await asyncio.to_thread(fn)
             # 计算动作函数执行耗时。
             fn_elapsed_ms = int((time.monotonic() - fn_started_at) * 1000)
             # 列表返回值场景（批量动作）。
@@ -357,6 +378,9 @@ class AutoVTGuiApp:
         except Exception:
             # 刷新失败不影响主流程，仅记录日志排查。
             log.exception("动作后刷新设备区失败", action=action_name, refresh_elapsed_ms=refresh_elapsed_ms)
+        finally:
+            # 无论成功失败都要复位动作标记，保证后续按钮可再次使用。
+            self._action_running = False
         # 计算动作总耗时（包含动作执行、提示条与刷新触发）。
         total_elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
         # 总耗时超过阈值时记录告警，便于后续定位卡住点。
@@ -399,6 +423,9 @@ class AutoVTGuiApp:
         while self._monitor_running:
             await asyncio.sleep(DEVICE_MONITOR_INTERVAL_SEC)
             if not self._logged_in:
+                continue
+            # 当前有后台设备动作执行时跳过自动刷新，避免和 stop/start 等重操作并发。
+            if self._action_running:
                 continue
             # 当前不在“设备列表”页时跳过自动刷新，避免后台日志扫描影响账号筛选流畅度。
             if self._current_tab_index != 0:
@@ -505,12 +532,32 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
 
     # 定义 Flet 入口回调。
     def _main(page: ft.Page) -> None:
-        # 创建 GUI 应用实例。
-        app = AutoVTGuiApp(page=page, loop_interval_sec=loop_interval_sec)
-        # 缓存应用实例，供 Ctrl+C 处理器停机使用。
-        app_holder["app"] = app
-        # 启动 GUI 页面。
-        app.start()
+        try:
+            # 创建 GUI 应用实例。
+            app = AutoVTGuiApp(page=page, loop_interval_sec=loop_interval_sec)
+            # 缓存应用实例，供 Ctrl+C 处理器停机使用。
+            app_holder["app"] = app
+            # 启动 GUI 页面。
+            app.start()
+        except Exception as exc:
+            # 记录 GUI 启动阶段完整异常堆栈，避免只在 Flet 顶层看到裸异常。
+            log.exception("GUI 启动失败", error=str(exc))
+            try:
+                # 清空页面，避免保留半初始化控件。
+                page.clean()
+                # 展示可读的启动失败提示，避免用户看到空白页。
+                page.add(
+                    ft.Container(
+                        expand=True,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Text(f"GUI 启动失败: {exc}", color=ft.Colors.RED_700, size=16),
+                    )
+                )
+                # 提交页面更新，确保错误信息立即可见。
+                page.update()
+            except Exception:
+                # 连错误页都展示失败时，只记录日志避免再次抛栈。
+                log.exception("展示 GUI 启动失败页面失败", error=str(exc))
 
     # 执行 Flet 事件循环。
     try:
@@ -521,6 +568,12 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
         # 仅在中断退出码场景吞掉异常，其它退出码继续抛出。
         if int(getattr(exc, "code", 0) or 0) != 130:
             raise
+    # 捕获 GUI 主循环异常，统一记录错误日志，避免启动失败时静默退出。
+    except Exception as exc:
+        # 记录 GUI 主循环异常堆栈，便于排查 Flet 运行时问题。
+        log.exception("GUI 主循环异常退出", error=str(exc))
+        # 继续向上抛出异常，保持调用方可感知失败。
+        raise
     # 退出时恢复原始 SIGINT 处理器。
     finally:
         # 恢复调用 run_gui 之前的 SIGINT 行为。

@@ -16,7 +16,7 @@ from typing import Any, Callable
 import flet as ft
 from openpyxl import Workbook
 
-from autovt.gui.account_importer import AccountFileImporter, IMPORT_SPLITTER, NAME_COUNTRY_OPTIONS, generate_account_name
+from autovt.gui.account_importer import AccountFileImporter, AccountImportResult, IMPORT_SPLITTER, NAME_COUNTRY_OPTIONS, generate_account_name
 from autovt.gui.helpers import (
     ACCOUNT_PAGE_SIZE,
     VT_PWD_KEY,
@@ -48,6 +48,8 @@ class AccountTab:
         self._show_snack = show_snack
 
         self._refreshing = False
+        self._exporting = False
+        self._importing = False
         self._page_index = 1
         self._total = 0
         self._total_pages = 1
@@ -198,7 +200,7 @@ class AccountTab:
         )
         # 展示“风控状态 + 一键恢复账号问题”的规则说明，避免用户误解批量操作条件。
         problem_reset_hint = ft.Text(
-            "说明：风控页会写入 status=4（风控限制）；按钮右侧“可恢复: N”为当前命中的可恢复账号数；“一键恢复账号问题”只处理 status=3 且 fb_fail_num<3 且 fb_status!=1 的账号，执行后改为 status=0 并清空 device。",
+            "说明：右侧“可恢复: N”表示现在还能重新启用的账号数量。点击“一键恢复账号问题”后，会把“账号问题”里失败少于 3 次、且 Facebook 还没成功的账号，改回“未使用”并清空设备绑定。“风控限制”的账号不会被这个按钮处理。",
             size=12,
             color=ft.Colors.BLUE_GREY_700,
         )
@@ -246,6 +248,22 @@ class AccountTab:
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新账号列表数据。"""
+        if self._refreshing or not self.list_column:
+            return
+        self._refreshing = True
+        try:
+            # 把读库和统计逻辑调度到后台任务，避免同步阻塞 Flet 事件线程。
+            self.page.run_task(self._refresh_async, source, show_toast)
+        except Exception as exc:
+            # 调度失败时立即复位刷新标记，避免后续刷新被永久跳过。
+            self._refreshing = False
+            # 记录调度异常，便于定位 Flet 运行时问题。
+            log.exception("调度账号列表刷新任务失败", source=source, error=str(exc))
+            # 给用户返回可读提示，避免误以为点击无效。
+            self._show_snack(f"刷新账号失败: {exc}")
+
+    async def _refresh_async(self, source: str, show_toast: bool) -> None:
+        """在线程池中读取账号页数据，避免同步查询阻塞界面。"""
         # 记录刷新总起点，便于输出完整耗时。
         started_at = time.monotonic()
         # 初始化 count 查询耗时（毫秒）。
@@ -256,55 +274,51 @@ class AccountTab:
         retryable_count_elapsed_ms = 0
         # 初始化渲染提交耗时（毫秒）。
         render_elapsed_ms = 0
-        if self._refreshing or not self.list_column:
-            return
-        self._refreshing = True
         try:
-            # 记录 count 查询起点。
-            step_started_at = time.monotonic()
+            # 读取当前筛选条件，供后台线程构建独立数据库查询快照。
             email_kw, status_f, fb_f, vinted_f, titok_f = self._get_filter_values()
-            total_count = self.user_db.count_users_filtered(
-                email_keyword=email_kw, status=status_f,
-                fb_status=fb_f, vinted_status=vinted_f, titok_status=titok_f,
+            # 在线程池中读取账号页完整快照，避免 UI 主线程等待 SQLite。
+            snapshot = await asyncio.to_thread(
+                self._load_account_page_snapshot,
+                self.user_db.path,
+                self._page_index,
+                email_kw,
+                status_f,
+                fb_f,
+                vinted_f,
+                titok_f,
             )
-            # 统计 count 查询耗时。
-            count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-            total_pages = max((int(total_count) + ACCOUNT_PAGE_SIZE - 1) // ACCOUNT_PAGE_SIZE, 1)
-            self._total = int(total_count)
-            self._total_pages = int(total_pages)
-
-            if self._page_index > self._total_pages:
-                self._page_index = self._total_pages
-            if self._page_index < 1:
-                self._page_index = 1
-
-            # 记录列表查询起点。
-            step_started_at = time.monotonic()
-            rows = self.user_db.list_users_page_filtered(
-                page=self._page_index, page_size=ACCOUNT_PAGE_SIZE,
-                email_keyword=email_kw, status=status_f,
-                fb_status=fb_f, vinted_status=vinted_f, titok_status=titok_f,
-            )
-            # 统计列表查询耗时。
-            list_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-
+            # 回填 count 查询耗时。
+            count_elapsed_ms = int(snapshot["count_elapsed_ms"])
+            # 回填列表查询耗时。
+            list_elapsed_ms = int(snapshot["list_elapsed_ms"])
+            # 回填“可恢复账号数”查询耗时。
+            retryable_count_elapsed_ms = int(snapshot["retryable_count_elapsed_ms"])
+            # 回填当前页码，兼容页码越界后自动收敛。
+            self._page_index = int(snapshot["page_index"])
+            # 回填总条数。
+            self._total = int(snapshot["total_count"])
+            # 回填总页数。
+            self._total_pages = int(snapshot["total_pages"])
+            # 取出当前页数据行。
+            rows = list(snapshot["rows"])
             # 记录渲染提交起点。
             step_started_at = time.monotonic()
-            # 先刷新“一键恢复”按钮旁的可恢复数量，保证顶部统计与列表数据同步。
-            self._update_retryable_problem_count(source=source)
-            # 统计“可恢复账号数”查询耗时。
-            retryable_count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-            # 重新记录渲染提交起点，避免把数量查询时间算进渲染耗时。
-            step_started_at = time.monotonic()
+            # 更新顶部“可恢复账号”数量显示。
+            self._apply_retryable_problem_count(snapshot["retryable_count"])
+            # 渲染当前页账号卡片。
             self._render_rows(rows)
+            # 更新顶部汇总统计。
             self._update_summary(self._total, len(rows))
+            # 更新分页控件状态。
             self._update_pagination()
+            # 手动刷新场景给出友好提示。
             if source == "manual" and show_toast:
                 self._show_snack(f"账号列表已刷新，第 {self._page_index} 页共 {len(rows)} 条。")
+            # 提交页面更新，确保列表和统计立即可见。
             self.page.update()
             # 统计渲染提交耗时。
             render_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-
             # 计算本次刷新总耗时。
             total_elapsed_ms = int((time.monotonic() - started_at) * 1000)
             # 总耗时较长时输出告警日志，便于定位卡顿段。
@@ -363,43 +377,99 @@ class AccountTab:
                 )
                 self._show_snack(f"刷新账号失败: {exc}")
         finally:
+            # 无论成功失败都要复位刷新标记，保证后续仍可再次刷新。
             self._refreshing = False
 
-    def _update_retryable_problem_count(self, source: str) -> None:
+    @staticmethod
+    def _load_account_page_snapshot(
+        db_path: Path,
+        page_index: int,
+        email_keyword: str,
+        status: int | None,
+        fb_status: int | None,
+        vinted_status: int | None,
+        titok_status: int | None,
+    ) -> dict[str, Any]:
+        """使用独立短连接读取账号页快照，避免后台线程复用 UI 线程连接。"""
+        # 创建独立数据库读取连接，避免和主线程共享同一 SQLite 连接。
+        reader = UserDB(db_path=db_path, connect_timeout_sec=0.6, busy_timeout_ms=600)
+        try:
+            # 建立 SQLite 连接，供本次快照读取使用。
+            reader.connect()
+            # 记录 count 查询起点。
+            step_started_at = time.monotonic()
+            # 查询当前筛选条件命中的总条数。
+            total_count = int(
+                reader.count_users_filtered(
+                    email_keyword=email_keyword,
+                    status=status,
+                    fb_status=fb_status,
+                    vinted_status=vinted_status,
+                    titok_status=titok_status,
+                )
+            )
+            # 统计 count 查询耗时。
+            count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 计算总页数，最少保留 1 页避免分页控件出现 0。
+            total_pages = max((int(total_count) + ACCOUNT_PAGE_SIZE - 1) // ACCOUNT_PAGE_SIZE, 1)
+            # 先对页码做上下界保护。
+            safe_page_index = max(1, min(int(page_index), int(total_pages)))
+            # 记录列表查询起点。
+            step_started_at = time.monotonic()
+            # 读取当前页数据。
+            rows = reader.list_users_page_filtered(
+                page=safe_page_index,
+                page_size=ACCOUNT_PAGE_SIZE,
+                email_keyword=email_keyword,
+                status=status,
+                fb_status=fb_status,
+                vinted_status=vinted_status,
+                titok_status=titok_status,
+            )
+            # 统计列表查询耗时。
+            list_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 记录可恢复数量查询起点。
+            step_started_at = time.monotonic()
+            # 查询当前满足“一键恢复”条件的账号总数。
+            retryable_count = int(reader.count_retryable_problem_users(max_fb_fail_num=3))
+            # 统计“可恢复账号数”查询耗时。
+            retryable_count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 返回当前页所需完整快照。
+            return {
+                "count_elapsed_ms": count_elapsed_ms,
+                "list_elapsed_ms": list_elapsed_ms,
+                "retryable_count_elapsed_ms": retryable_count_elapsed_ms,
+                "page_index": safe_page_index,
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "retryable_count": retryable_count,
+                "rows": rows,
+            }
+        finally:
+            # 独立读取连接使用后立即关闭，避免连接泄漏。
+            try:
+                # 关闭本次快照读取使用的 SQLite 连接。
+                reader.close()
+            except Exception as exc:
+                # 关闭失败时仅记录日志，不再影响主流程。
+                log.warning("关闭账号页快照读取连接失败", error=str(exc))
+
+    def _apply_retryable_problem_count(self, retryable_count: int | str) -> None:
+        """把后台查询结果安全回填到顶部“可恢复账号”提示。"""
         # 顶部计数控件尚未构建时直接返回，避免初始化阶段访问空引用。
         if not self.retryable_problem_count_text:
             return
-        try:
-            # 查询当前满足“一键恢复”条件的账号总数。
-            retryable_count = self.user_db.count_retryable_problem_users(max_fb_fail_num=3)
-            # 对统计结果做非负保护，避免异常值污染界面。
-            safe_retryable_count = max(int(retryable_count), 0)
-            # 把最新数量显示到按钮右侧文本。
-            self.retryable_problem_count_text.value = f"可恢复: {safe_retryable_count}"
-            # 有可恢复账号时使用更醒目的颜色，方便用户注意到待处理数量。
-            if safe_retryable_count > 0:
-                self.retryable_problem_count_text.color = ft.Colors.ORANGE_700
-                self.retryable_problem_count_text.weight = ft.FontWeight.W_600
-            # 没有可恢复账号时恢复中性色，降低视觉噪音。
-            else:
-                self.retryable_problem_count_text.color = ft.Colors.BLUE_GREY_700
-                self.retryable_problem_count_text.weight = ft.FontWeight.W_500
-        except Exception as exc:
-            # SQLite 锁冲突只记录告警，避免影响账号列表主刷新链路。
-            if self._is_sqlite_locked_error(exc):
-                log.warning(
-                    "刷新可恢复账号数量遇到 SQLite 锁冲突，已跳过本轮更新",
-                    source=source,
-                    error=str(exc),
-                )
-            # 其它异常记录完整堆栈，便于定位统计 SQL 或 UI 刷新问题。
-            else:
-                log.exception("刷新可恢复账号数量失败", source=source)
-            # 统计失败时显示占位符，避免界面继续展示旧数量误导用户。
-            self.retryable_problem_count_text.value = "可恢复: -"
-            # 失败占位符使用中性色，保持界面稳定。
+        # 对统计结果做非负保护，避免异常值污染界面。
+        safe_retryable_count = max(int(retryable_count), 0)
+        # 把最新数量显示到按钮右侧文本。
+        self.retryable_problem_count_text.value = f"可恢复: {safe_retryable_count}"
+        # 有可恢复账号时使用更醒目的颜色，方便用户注意到待处理数量。
+        if safe_retryable_count > 0:
+            self.retryable_problem_count_text.color = ft.Colors.ORANGE_700
+            self.retryable_problem_count_text.weight = ft.FontWeight.W_600
+        # 没有可恢复账号时恢复中性色，降低视觉噪音。
+        else:
             self.retryable_problem_count_text.color = ft.Colors.BLUE_GREY_700
-            # 失败占位符恢复常规字重。
             self.retryable_problem_count_text.weight = ft.FontWeight.W_500
 
     # ═══════════════════════════════════════════════════════════════════
@@ -596,6 +666,10 @@ class AccountTab:
     # 定义“导出按钮点击入口”方法。
     def _handle_export_filtered_accounts(self, _e: ft.ControlEvent | None = None) -> None:
         # 在 Flet 事件线程调度异步导出任务。
+        if self._exporting:
+            # 已有导出任务在执行时直接提示，避免重复写文件。
+            self._show_snack("导出任务执行中，请等待当前导出完成。")
+            return
         try:
             # 调度“按当前筛选导出账号”任务。
             self.page.run_task(self._export_filtered_accounts_async)
@@ -607,42 +681,51 @@ class AccountTab:
             self._show_snack(f"导出任务启动失败: {exc}")
 
     # 定义“按当前筛选条件拉取导出数据”方法。
-    def _list_filtered_rows_for_export(self) -> list[dict[str, Any]]:
-        # 读取当前筛选控件值（邮箱关键字 + 4 种状态）。
-        email_kw, status_f, fb_f, vinted_f, titok_f = self._get_filter_values()
-        # 查询当前筛选命中的总条数。
-        total_count = self.user_db.count_users_filtered(
-            # 传入邮箱关键字筛选参数。
-            email_keyword=email_kw,
-            # 传入账号状态筛选参数。
-            status=status_f,
-            # 传入 FB 状态筛选参数。
-            fb_status=fb_f,
-            # 传入 VT 状态筛选参数。
-            vinted_status=vinted_f,
-            # 传入 TT 状态筛选参数。
-            titok_status=titok_f,
-        )
-        # 没有命中数据时返回空列表。
-        if int(total_count) <= 0:
-            return []
-        # 查询全部命中数据用于导出（不走分页）。
-        return self.user_db.list_users_filtered(
-            # 使用筛选总数作为导出上限。
-            limit=int(total_count),
-            # 从第 0 条开始导出。
-            offset=0,
-            # 传入邮箱关键字筛选参数。
-            email_keyword=email_kw,
-            # 传入账号状态筛选参数。
-            status=status_f,
-            # 传入 FB 状态筛选参数。
-            fb_status=fb_f,
-            # 传入 VT 状态筛选参数。
-            vinted_status=vinted_f,
-            # 传入 TT 状态筛选参数。
-            titok_status=titok_f,
-        )
+    @staticmethod
+    def _list_filtered_rows_for_export(
+        db_path: Path,
+        email_keyword: str,
+        status: int | None,
+        fb_status: int | None,
+        vinted_status: int | None,
+        titok_status: int | None,
+    ) -> list[dict[str, Any]]:
+        # 创建独立数据库读取连接，避免后台线程复用 UI 线程连接。
+        reader = UserDB(db_path=db_path, connect_timeout_sec=0.8, busy_timeout_ms=800)
+        try:
+            # 建立 SQLite 连接，供本次导出读取使用。
+            reader.connect()
+            # 查询当前筛选命中的总条数。
+            total_count = int(
+                reader.count_users_filtered(
+                    email_keyword=email_keyword,
+                    status=status,
+                    fb_status=fb_status,
+                    vinted_status=vinted_status,
+                    titok_status=titok_status,
+                )
+            )
+            # 没有命中数据时返回空列表。
+            if total_count <= 0:
+                return []
+            # 查询全部命中数据用于导出（不走分页）。
+            return reader.list_users_filtered(
+                limit=total_count,
+                offset=0,
+                email_keyword=email_keyword,
+                status=status,
+                fb_status=fb_status,
+                vinted_status=vinted_status,
+                titok_status=titok_status,
+            )
+        finally:
+            # 独立读取连接使用后立即关闭，避免连接泄漏。
+            try:
+                # 关闭本次导出读取连接。
+                reader.close()
+            except Exception as exc:
+                # 关闭失败时只记录日志，不再中断导出流程。
+                log.warning("关闭导出读取连接失败", error=str(exc))
 
     # 定义“组装 outlook 导出字段”的方法。
     @staticmethod
@@ -767,19 +850,24 @@ class AccountTab:
     # 定义“异步执行导出并复制剪贴板”的方法。
     async def _export_filtered_accounts_async(self) -> None:
         # 使用异常保护导出流程，保证界面不崩溃。
+        self._exporting = True
         try:
-            # 按当前筛选读取全部命中数据。
-            rows = self._list_filtered_rows_for_export()
+            # 读取当前筛选条件，供后台线程查询导出数据。
+            email_kw, status_f, fb_f, vinted_f, titok_f = self._get_filter_values()
+            # 在线程池中完成读库、组装和写文件，避免阻塞 GUI。
+            rows, export_text, export_path = await asyncio.to_thread(
+                self._prepare_export_payload,
+                self.user_db.path,
+                email_kw,
+                status_f,
+                fb_f,
+                vinted_f,
+                titok_f,
+            )
             # 无数据时直接提示并结束。
             if len(rows) == 0:
                 self._show_snack("当前筛选条件下没有可导出的账号。")
                 return
-            # 构建导出二维表数据。
-            export_table_rows = self._build_export_table_rows(rows)
-            # 构建导出文本内容。
-            export_text = self._build_export_tsv(export_table_rows)
-            # 保存导出文件到运行期目录。
-            export_path = self._save_export_file(export_table_rows)
             # 先标记剪贴板复制是否成功。
             clipboard_ok = False
             # 尝试把导出文本复制到系统剪贴板。
@@ -804,6 +892,40 @@ class AccountTab:
             log.exception("账号导出失败", error=str(exc))
             # 给用户可读错误提示。
             self._show_snack(f"导出失败: {exc}")
+        finally:
+            # 无论成功失败都复位导出标记，保证后续仍可再次导出。
+            self._exporting = False
+
+    def _prepare_export_payload(
+        self,
+        db_path: Path,
+        email_keyword: str,
+        status: int | None,
+        fb_status: int | None,
+        vinted_status: int | None,
+        titok_status: int | None,
+    ) -> tuple[list[dict[str, Any]], str, Path]:
+        """在线程池中准备导出数据与文件，避免阻塞 GUI 主线程。"""
+        # 按当前筛选条件读取全部命中数据。
+        rows = self._list_filtered_rows_for_export(
+            db_path,
+            email_keyword,
+            status,
+            fb_status,
+            vinted_status,
+            titok_status,
+        )
+        # 无数据时直接返回空结果，调用方负责提示。
+        if len(rows) == 0:
+            return [], "", Path("")
+        # 构建导出二维表数据。
+        export_table_rows = self._build_export_table_rows(rows)
+        # 构建导出文本内容。
+        export_text = self._build_export_tsv(export_table_rows)
+        # 保存导出文件到运行期目录。
+        export_path = self._save_export_file(export_table_rows)
+        # 返回行数据、剪贴板文本和导出文件路径。
+        return rows, export_text, export_path
 
     # ═══════════════════════════════════════════════════════════════════
     # 表单弹窗 (新增 / 编辑)
@@ -811,6 +933,10 @@ class AccountTab:
 
     def _pick_import_file(self, _e: ft.ControlEvent | None = None) -> None:
         """同步点击入口：调度异步文件选择任务。"""
+        # 已有导入任务在执行时直接提示，避免并发写库。
+        if self._importing:
+            self._show_snack("批量导入执行中，请等待当前导入完成。")
+            return
         # 文件选择器未初始化时直接提示。
         if not self.import_file_picker:
             self._show_snack("文件选择器未初始化，请重试。")
@@ -909,54 +1035,99 @@ class AccountTab:
         # 记录导入启动日志。
         log.info("开始批量导入账号", file_path=selected_path, name_locale=selected_locale)
         try:
-            # 执行“先校验后写库”的导入逻辑。
-            result = self._account_importer.import_from_file(
-                file_path=selected_path,
-                vt_pwd=vt_pwd_value,
-                name_locale=selected_locale,
+            # 标记当前已有导入任务执行中，避免重复点按钮并发写库。
+            self._importing = True
+            # 在后台线程中执行整文件读取、解析和写库，避免阻塞 GUI。
+            self.page.run_task(self._import_file_async, selected_path, vt_pwd_value, selected_locale)
+        except Exception as exc:
+            # 调度失败时立即复位导入标记，避免后续导入被永久阻塞。
+            self._importing = False
+            # 记录导入任务调度失败异常。
+            log.exception("调度批量导入任务失败", file_path=selected_path, name_locale=selected_locale, error=str(exc))
+            # 给用户提示失败原因。
+            self._show_snack(f"批量导入失败: {exc}")
+
+    async def _import_file_async(self, selected_path: str, vt_pwd_value: str, selected_locale: str) -> None:
+        """在线程池中执行批量导入，避免同步文件/数据库操作卡住 GUI。"""
+        try:
+            # 在线程池中执行“先校验后写库”的导入逻辑。
+            result = await asyncio.to_thread(
+                self._import_file_sync,
+                self.user_db.path,
+                selected_path,
+                vt_pwd_value,
+                selected_locale,
             )
         # 捕获导入主流程异常并提示。
         except Exception as exc:
             log.exception("批量导入执行异常", file_path=selected_path, name_locale=selected_locale, error=str(exc))
             self._show_snack(f"批量导入失败: {exc}")
-            return
-        # 命中格式错误时直接提示，不执行刷新。
-        if result.has_validation_error():
-            # 取前 3 条错误做提示摘要。
-            preview = "；".join(result.validation_errors[:3])
-            # 给出“未写库”明确提示。
-            self._show_snack(f"导入失败：发现 {len(result.validation_errors)} 条格式错误，未写入 t_user。{preview}")
-            return
-        # 构造成功统计文案。
-        success_msg = (
-            f"导入完成：总行 {result.total_non_empty_lines}，"
-            f"有效 {result.valid_line_count}，"
-            f"新增 {result.inserted_count}，"
-            f"已存在跳过 {result.skipped_existing_count}，"
-            f"文件内重复跳过 {result.skipped_duplicate_in_file_count}"
-        )
-        # 写库阶段仍可能存在单条异常，单独补充提示。
-        if len(result.insert_errors) > 0:
-            # 取前 2 条错误做摘要。
-            insert_error_preview = "；".join(result.insert_errors[:2])
-            # 拼接错误统计文案。
-            success_msg = f"{success_msg}，写库失败 {len(result.insert_errors)}。{insert_error_preview}"
-        # 输出导入结果日志。
-        log.info(
-            "批量导入完成",
-            file_path=selected_path,
-            total_non_empty_lines=result.total_non_empty_lines,
-            valid_line_count=result.valid_line_count,
-            inserted_count=result.inserted_count,
-            skipped_existing_count=result.skipped_existing_count,
-            skipped_duplicate_in_file_count=result.skipped_duplicate_in_file_count,
-            insert_error_count=len(result.insert_errors),
-        )
-        # 刷新账号列表展示。
-        self._page_index = 1
-        self.refresh(source="import_file", show_toast=False)
-        # 给出导入完成提示。
-        self._show_snack(success_msg)
+        else:
+            # 命中格式错误时直接提示，不执行刷新。
+            if result.has_validation_error():
+                # 取前 3 条错误做提示摘要。
+                preview = "；".join(result.validation_errors[:3])
+                # 给出“未写库”明确提示。
+                self._show_snack(f"导入失败：发现 {len(result.validation_errors)} 条格式错误，未写入 t_user。{preview}")
+                return
+            # 构造成功统计文案。
+            success_msg = (
+                f"导入完成：总行 {result.total_non_empty_lines}，"
+                f"有效 {result.valid_line_count}，"
+                f"新增 {result.inserted_count}，"
+                f"已存在跳过 {result.skipped_existing_count}，"
+                f"文件内重复跳过 {result.skipped_duplicate_in_file_count}"
+            )
+            # 写库阶段仍可能存在单条异常，单独补充提示。
+            if len(result.insert_errors) > 0:
+                # 取前 2 条错误做摘要。
+                insert_error_preview = "；".join(result.insert_errors[:2])
+                # 拼接错误统计文案。
+                success_msg = f"{success_msg}，写库失败 {len(result.insert_errors)}。{insert_error_preview}"
+            # 输出导入结果日志。
+            log.info(
+                "批量导入完成",
+                file_path=selected_path,
+                total_non_empty_lines=result.total_non_empty_lines,
+                valid_line_count=result.valid_line_count,
+                inserted_count=result.inserted_count,
+                skipped_existing_count=result.skipped_existing_count,
+                skipped_duplicate_in_file_count=result.skipped_duplicate_in_file_count,
+                insert_error_count=len(result.insert_errors),
+            )
+            # 刷新账号列表展示。
+            self._page_index = 1
+            self.refresh(source="import_file", show_toast=False)
+            # 给出导入完成提示。
+            self._show_snack(success_msg)
+        finally:
+            # 无论成功失败都复位导入标记，保证后续仍可再次导入。
+            self._importing = False
+
+    @staticmethod
+    def _import_file_sync(db_path: Path, selected_path: str, vt_pwd_value: str, selected_locale: str) -> AccountImportResult:
+        """在线程池中执行账号导入，避免跨线程复用 UI 线程数据库连接。"""
+        # 为导入流程创建独立数据库连接，避免和 GUI 主线程共享同一连接。
+        user_db = UserDB(db_path=db_path, connect_timeout_sec=1.0, busy_timeout_ms=1000)
+        try:
+            # 建立 SQLite 连接，供导入流程短时使用。
+            user_db.connect()
+            # 为当前导入任务创建独立导入器，避免复用 UI 线程中的 importer 实例。
+            importer = AccountFileImporter(user_db=user_db, log=log)
+            # 执行“先校验后写库”的导入逻辑。
+            return importer.import_from_file(
+                file_path=selected_path,
+                vt_pwd=vt_pwd_value,
+                name_locale=selected_locale,
+            )
+        finally:
+            # 导入结束后立即关闭独立连接，避免连接泄漏。
+            try:
+                # 关闭本次导入使用的 SQLite 连接。
+                user_db.close()
+            except Exception as exc:
+                # 关闭失败时仅记录日志，不再覆盖原始导入错误。
+                log.warning("关闭批量导入数据库连接失败", file_path=selected_path, error=str(exc))
 
     def _open_create_dialog(self, _e: ft.ControlEvent | None = None) -> None:
         self._open_form_dialog(dialog_title="新增账号", row=None)

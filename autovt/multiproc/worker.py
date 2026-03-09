@@ -21,7 +21,7 @@ from autovt.settings import (
     WORKER_RECOVER_RETRY_DELAY_SEC,
     WORKER_WAITING_POLL_INTERVAL_SEC,
 )
-from autovt.tasks.task_context import TaskContext
+from autovt.tasks.task_context import DEFAULT_DEVICE_LOCALE, TaskContext
 from autovt.userdb import (
     FB_DELETE_NUM_DEFAULT,
     FB_DELETE_NUM_KEY,
@@ -88,11 +88,11 @@ def _read_device_locale(log) -> str:
     # 读取中任意异常都降级为 unknown，不中断 worker。
     except Exception as exc:
         # 记录降级原因，便于排查。
-        log.warning("读取设备语言失败，使用 unknown", error=str(exc))
+        log.warning("读取设备语言失败，回退默认语言区域", error=str(exc), fallback_locale=DEFAULT_DEVICE_LOCALE)
     # 三个字段都未命中时记录提示日志。
-    log.warning("未识别到有效设备语言，使用 unknown")
-    # 返回 unknown 作为统一降级值。
-    return "unknown"
+    log.warning("未识别到有效设备语言，回退默认语言区域", fallback_locale=DEFAULT_DEVICE_LOCALE)
+    # 返回默认语言区域，避免任务层出现 unknown 分支。
+    return DEFAULT_DEVICE_LOCALE
 
 
 def _build_task_context(
@@ -416,15 +416,37 @@ def worker_main(
     _install_worker_signal_policy(log)
     log.info("worker 进程启动", serial=serial, loop_interval_sec=loop_interval_sec)
 
-    # 子进程内独立数据库连接：用于原子分配 t_user、读取 t_config 映射。
-    user_db = UserDB()
-    user_db.connect()
-
-    # 延迟导入运行时模块，避免主控进程被设备依赖拖住。
-    from autovt.runtime import create_poco, setup_device
-
-    # 导入“单轮任务函数”，worker 通过循环重复调用它。
-    from autovt.tasks.open_settings import run_once
+    # 先声明数据库对象占位，便于启动失败时安全关闭。
+    user_db: UserDB | None = None
+    # 使用启动期异常保护，避免 connect/import 失败时直接秒退无日志。
+    try:
+        # 子进程内独立数据库连接：用于原子分配 t_user、读取 t_config 映射。
+        user_db = UserDB()
+        # 建立数据库连接，供后续主循环复用。
+        user_db.connect()
+        # 延迟导入运行时模块，避免主控进程被设备依赖拖住。
+        from autovt.runtime import create_poco as imported_create_poco, setup_device as imported_setup_device
+        # 导入“单轮任务函数”，worker 通过循环重复调用它。
+        from autovt.tasks.open_settings import run_once as imported_run_once
+    # 启动期任一步失败都统一记录并上报 fatal，避免主进程只能看到 exit_code。
+    except Exception as exc:
+        # 格式化异常摘要，便于主进程和 GUI 直接展示。
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        # 向主进程上报启动级 fatal 事件。
+        _emit(event_queue, serial, "fatal", f"worker 启动初始化失败: {detail}")
+        # 记录完整异常堆栈，便于排查真实根因。
+        log.exception("worker 启动初始化失败", serial=serial, error=detail)
+        # 启动失败时若数据库已打开，则主动关闭避免连接泄漏。
+        if user_db is not None:
+            try:
+                # 关闭已打开的数据库连接。
+                user_db.close()
+            # 关闭失败时只记录日志，不再覆盖原始错误。
+            except Exception:
+                # 记录关闭异常，便于追踪资源泄漏问题。
+                log.exception("worker 启动失败后关闭 user_db 失败", serial=serial)
+        # 直接结束当前子进程入口。
+        return
 
     # 延迟加载 Airtest 异常类型映射。
     airtest_errors = _load_airtest_error_types()
@@ -705,8 +727,8 @@ def worker_main(
             stop_event=stop_event,
             event_queue=event_queue,
             log=log,
-            setup_device=setup_device,
-            create_poco=create_poco,
+            setup_device=imported_setup_device,
+            create_poco=imported_create_poco,
         )
         # 只有初始化成功时才读取一次设备语言。
         if ok:
@@ -847,7 +869,7 @@ def worker_main(
                     runtime_context = _attach_worker_loop_seq(runtime_context)
                     email_account = str(runtime_context.user_info.get("email_account", "")).strip()
                     try:
-                        run_once(task_context=runtime_context)
+                        imported_run_once(task_context=runtime_context)
                         _emit(event_queue, serial, "running", f"手动执行 1 轮完成 | email={email_account or '-'}", email_account=email_account)
                         log.info(
                             "手动执行一轮任务完成",
@@ -917,7 +939,7 @@ def worker_main(
             runtime_context = _attach_worker_loop_seq(runtime_context)
             email_account = str(runtime_context.user_info.get("email_account", "")).strip()
             try:
-                run_once(task_context=runtime_context)
+                imported_run_once(task_context=runtime_context)
                 _emit(event_queue, serial, "running", f"自动执行 1 轮完成 | email={email_account or '-'}", email_account=email_account)
                 log.info(
                     "自动执行一轮任务完成",

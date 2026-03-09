@@ -88,8 +88,16 @@ def _show_devices(manager: DeviceProcessManager) -> None:
 
 
 def run_console(loop_interval_sec: float) -> None:
-    # 创建主控管理器（负责子进程生命周期）。
-    manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
+    try:
+        # 创建主控管理器（负责子进程生命周期）。
+        manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
+    except Exception as exc:
+        # 记录主控启动失败堆栈，避免只在终端看到裸异常。
+        log.exception("CLI 主控初始化失败", interval=loop_interval_sec, error=str(exc))
+        # 把失败原因打印到终端，便于用户直接感知。
+        print(f"主控启动失败: {exc}")
+        # 直接结束当前启动流程。
+        return
     print("autovt 多设备主控已启动，输入 help 查看命令。")
     log.info("主控已启动", interval=loop_interval_sec)
 
@@ -128,12 +136,18 @@ def run_console(loop_interval_sec: float) -> None:
                 if not args:
                     print("用法: start all | start <serial> [serial...]")
                     continue
-                if len(args) == 1 and args[0] == "all":
-                    for msg in manager.start_all():
-                        print(msg)
-                else:
-                    for serial in args:
-                        print(manager.start_worker(serial))
+                try:
+                    if len(args) == 1 and args[0] == "all":
+                        for msg in manager.start_all():
+                            print(msg)
+                    else:
+                        for serial in args:
+                            print(manager.start_worker(serial))
+                except Exception as exc:
+                    # 记录启动设备异常，避免一次失败打断整个 REPL。
+                    log.exception("CLI 启动设备失败", args=args, error=str(exc))
+                    # 把失败信息打印到终端，便于继续后续命令。
+                    print(f"启动设备失败: {exc}")
                 continue
             if cmd == "stop":
                 # 停止设备进程：支持 all 或 serial 列表。
@@ -152,8 +166,14 @@ def run_console(loop_interval_sec: float) -> None:
                 if len(args) != 1:
                     print("用法: restart <serial>")
                     continue
-                for msg in manager.restart_worker(args[0]):
-                    print(msg)
+                try:
+                    for msg in manager.restart_worker(args[0]):
+                        print(msg)
+                except Exception as exc:
+                    # 记录重启设备异常，避免一次失败打断整个 REPL。
+                    log.exception("CLI 重启设备失败", serial=args[0], error=str(exc))
+                    # 把失败信息打印到终端，便于用户继续操作。
+                    print(f"重启设备失败: {exc}")
                 continue
             if cmd == "pause":
                 # 暂停自动循环（不会结束进程）。

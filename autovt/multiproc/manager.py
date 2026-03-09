@@ -5,6 +5,7 @@ import os
 import queue
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,17 +109,49 @@ class DeviceProcessManager:
         self._event_queue: mp.Queue = self._ctx.Queue()
         # 当前所有运行中的 worker 句柄。
         self._workers: dict[str, WorkerHandle] = {}
-        # 主进程数据库连接：用于设备状态展示账号邮箱、停机释放账号占用。
-        self.user_db = UserDB()
-        self.user_db.connect()
-        log.info("DeviceProcessManager 初始化完成", loop_interval_sec=loop_interval_sec)
+        # 为跨线程 GUI 操作准备递归锁，避免后台动作和前台刷新并发改状态表。
+        self._state_lock = threading.RLock()
+        # 缓存数据库文件路径，后续按需创建短连接，避免跨线程复用同一 SQLite 连接。
+        self._user_db_path = UserDB().path
+        log.info("DeviceProcessManager 初始化完成", loop_interval_sec=loop_interval_sec, user_db_path=str(self._user_db_path))
 
     def close(self) -> None:
-        # 关闭 manager 持有的数据库连接。
-        try:
-            self.user_db.close()
-        except Exception:
-            log.exception("关闭 manager.user_db 失败")
+        # 当前 manager 改为按需创建短连接，这里保留兼容入口并记录调试日志。
+        log.debug("DeviceProcessManager.close 调用完成（当前无常驻 SQLite 连接）")
+
+    def _open_user_db(self, connect_timeout_sec: float = 1.2, busy_timeout_ms: int = 1200) -> UserDB:
+        """创建一个短生命周期数据库连接，避免跨线程复用同一 SQLite 连接。"""
+        # 基于缓存的数据库路径创建独立连接对象。
+        user_db = UserDB(
+            db_path=self._user_db_path,
+            connect_timeout_sec=connect_timeout_sec,
+            busy_timeout_ms=busy_timeout_ms,
+        )
+        # 建立 SQLite 连接，供当前调用链短时使用。
+        user_db.connect()
+        # 返回已连接的数据库对象。
+        return user_db
+
+    def _get_worker(self, serial: str) -> WorkerHandle | None:
+        """在线程锁保护下读取单个 worker 句柄。"""
+        # 使用状态锁保护共享 worker 表读取。
+        with self._state_lock:
+            # 返回指定设备的 worker 句柄。
+            return self._workers.get(serial)
+
+    def _snapshot_worker_serials(self) -> list[str]:
+        """在线程锁保护下快照当前 worker serial 列表。"""
+        # 使用状态锁保护共享 worker 表遍历。
+        with self._state_lock:
+            # 返回当前全部 worker serial 快照。
+            return sorted(self._workers.keys())
+
+    def _snapshot_workers(self) -> list[tuple[str, WorkerHandle]]:
+        """在线程锁保护下快照当前 worker 列表。"""
+        # 使用状态锁保护共享 worker 表遍历。
+        with self._state_lock:
+            # 返回排序后的 worker 快照列表。
+            return list(sorted(self._workers.items()))
 
     def list_online_devices(self) -> list[str]:
         # 从 adb 读取当前在线设备列表。
@@ -271,7 +304,7 @@ class DeviceProcessManager:
         # 先清理一次已退出 worker，避免使用陈旧句柄误判。
         self._cleanup_dead(serial)
         # 读取设备对应 worker 句柄。
-        worker = self._workers.get(serial)
+        worker = self._get_worker(serial)
         # 无句柄时判定未运行。
         if not worker:
             return False
@@ -432,34 +465,66 @@ class DeviceProcessManager:
 
     def _update_state(self, serial: str, state: str, detail: str, event_time: float) -> None:
         # 把事件同步到内存中的 worker 状态。
-        worker = self._workers.get(serial)
-        if not worker:
-            return
-        worker.last_state = state
-        worker.last_detail = detail
-        worker.updated_at = event_time
+        with self._state_lock:
+            # 读取目标设备 worker 句柄。
+            worker = self._workers.get(serial)
+            # worker 不存在时直接返回。
+            if not worker:
+                return
+            # 更新最近状态。
+            worker.last_state = state
+            # 更新最近详情。
+            worker.last_detail = detail
+            # 更新时间戳。
+            worker.updated_at = event_time
 
     def _release_device_account(self, serial: str, reason: str) -> None:
         # 释放设备占用账号：status=1 回退 0；status=2/3/4 保持不变，仅清空 device。
+        user_db: UserDB | None = None
         try:
-            released = self.user_db.release_user_for_device(serial)
+            # 打开短连接，避免后台线程复用主线程连接。
+            user_db = self._open_user_db(connect_timeout_sec=0.8, busy_timeout_ms=800)
+            # 释放当前设备占用账号。
+            released = user_db.release_user_for_device(serial)
             if released > 0:
                 log.info("已释放设备占用账号", serial=serial, released=released, reason=reason)
         except Exception as exc:
             log.exception("释放设备占用账号失败", serial=serial, reason=reason, error=str(exc))
+        finally:
+            # 短连接使用后立即关闭，避免连接泄漏。
+            if user_db is not None:
+                try:
+                    # 关闭本次释放动作使用的数据库连接。
+                    user_db.close()
+                except Exception:
+                    # 关闭失败仅记录日志，不影响主流程。
+                    log.exception("关闭释放设备占用账号连接失败", serial=serial, reason=reason)
 
     # 定义“全局释放所有运行中账号”方法，供应用退出时兜底调用。
     def reset_all_running_accounts(self, reason: str) -> int:
         # 初始化影响行数，异常时回退 0。
         released = 0
+        # 准备数据库短连接占位，便于 finally 统一关闭。
+        user_db: UserDB | None = None
         try:
+            # 打开短连接，避免跨线程复用连接导致异常。
+            user_db = self._open_user_db(connect_timeout_sec=1.0, busy_timeout_ms=1000)
             # 执行全局重置：把所有 status=1 的账号回退为 0，并清空设备绑定。
-            released = self.user_db.reset_all_running_users()
+            released = user_db.reset_all_running_users()
             # 记录本次全局释放结果，便于排查退出后账号残留问题。
             log.info("已全局释放运行中账号", released=released, reason=reason)
         except Exception as exc:
             # 记录异常但不向上抛，避免退出链路被中断。
             log.exception("全局释放运行中账号失败", reason=reason, error=str(exc))
+        finally:
+            # 短连接使用后立即关闭，避免连接泄漏。
+            if user_db is not None:
+                try:
+                    # 关闭本次全局释放使用的数据库连接。
+                    user_db.close()
+                except Exception:
+                    # 关闭失败仅记录日志，不再中断调用方。
+                    log.exception("关闭全局释放账号连接失败", reason=reason)
         # 返回影响行数，供上层日志展示。
         return released
 
@@ -478,11 +543,14 @@ class DeviceProcessManager:
             pass
         if release_account:
             self._release_device_account(serial=serial, reason=release_reason)
-        self._workers.pop(serial, None)
+        # 使用状态锁保护 worker 表删除，避免和状态刷新并发冲突。
+        with self._state_lock:
+            # 从 worker 管理表移除当前设备句柄。
+            self._workers.pop(serial, None)
 
     def _cleanup_dead(self, serial: str) -> None:
         # 清理已经退出的子进程句柄，避免状态污染。
-        worker = self._workers.get(serial)
+        worker = self._get_worker(serial)
         if not worker:
             return
         if worker.process.is_alive():
@@ -496,7 +564,7 @@ class DeviceProcessManager:
 
     def _cleanup_all_dead(self) -> None:
         # 批量清理所有已退出 worker。
-        for serial in list(self._workers.keys()):
+        for serial in self._snapshot_worker_serials():
             self._cleanup_dead(serial)
 
     def drain_events(self) -> list[dict[str, str | float]]:
@@ -527,7 +595,7 @@ class DeviceProcessManager:
         self.drain_events()
         self._cleanup_dead(serial)
 
-        old = self._workers.get(serial)
+        old = self._get_worker(serial)
         if old and old.process.is_alive():
             log.warning("设备已在运行", serial=serial, pid=old.process.pid)
             return f"{serial}: 已在运行 pid={old.process.pid}"
@@ -546,15 +614,18 @@ class DeviceProcessManager:
         log.info("子进程已启动", serial=serial, pid=process.pid)
 
         # 保存句柄，供后续 stop/restart/status 使用。
-        self._workers[serial] = WorkerHandle(
-            serial=serial,
-            process=process,
-            stop_event=stop_event,
-            command_queue=command_queue,
-            last_state="starting",
-            last_detail=f"子进程已启动 pid={process.pid}",
-            updated_at=time.time(),
-        )
+        # 使用状态锁保护 worker 句柄写入，避免后台动作与状态刷新并发冲突。
+        with self._state_lock:
+            # 保存新启动的 worker 句柄，供后续 stop/restart/status 使用。
+            self._workers[serial] = WorkerHandle(
+                serial=serial,
+                process=process,
+                stop_event=stop_event,
+                command_queue=command_queue,
+                last_state="starting",
+                last_detail=f"子进程已启动 pid={process.pid}",
+                updated_at=time.time(),
+            )
         # 启动后做一次短探针：如果子进程“秒退”，直接返回失败原因，避免 GUI 误显示“已启动”。
         process.join(WORKER_STARTUP_PROBE_SEC)
         if not process.is_alive():
@@ -563,14 +634,16 @@ class DeviceProcessManager:
             # 构造统一失败详情文案。
             detail = f"子进程启动后立即退出 exit_code={exit_code}"
             # 回读句柄，更新状态快照给 GUI 展示。
-            worker = self._workers.get(serial)
+            worker = self._get_worker(serial)
             if worker:
                 # 秒退统一标记为 fatal，方便前端颜色和文案突出显示。
-                worker.last_state = "fatal"
-                # 写入失败详情。
-                worker.last_detail = detail
-                # 更新时间戳，确保 UI 立即刷新到最新状态。
-                worker.updated_at = time.time()
+                with self._state_lock:
+                    # 秒退统一标记为 fatal，方便前端颜色和文案突出显示。
+                    worker.last_state = "fatal"
+                    # 写入失败详情。
+                    worker.last_detail = detail
+                    # 更新时间戳，确保 UI 立即刷新到最新状态。
+                    worker.updated_at = time.time()
             log.error("子进程启动探针失败", serial=serial, pid=process.pid, exit_code=exit_code)
             return f"{serial}: 启动失败，{detail}"
         return f"{serial}: 启动成功 pid={process.pid}"
@@ -605,24 +678,28 @@ class DeviceProcessManager:
             if command == "pause":
                 # 挂起 worker 进程，当前执行步骤会立即冻结。
                 proc.suspend()
-                # 立即更新状态快照，UI 可立刻看到暂停态。
-                worker.last_state = "paused"
-                # 更新状态详情文案。
-                worker.last_detail = "已即时暂停（进程挂起）"
-                # 更新时间戳用于状态列表显示。
-                worker.updated_at = time.time()
+                # 使用状态锁保护内存状态更新，避免和状态刷新并发冲突。
+                with self._state_lock:
+                    # 立即更新状态快照，UI 可立刻看到暂停态。
+                    worker.last_state = "paused"
+                    # 更新状态详情文案。
+                    worker.last_detail = "已即时暂停（进程挂起）"
+                    # 更新时间戳用于状态列表显示。
+                    worker.updated_at = time.time()
                 # 记录即时暂停日志。
                 log.info("即时暂停成功", serial=serial, pid=pid)
                 return f"{serial}: 已即时暂停"
 
             # 即时恢复分支：恢复被挂起的进程继续执行。
             proc.resume()
-            # 立即更新状态快照为运行中。
-            worker.last_state = "running"
-            # 更新状态详情文案。
-            worker.last_detail = "已即时恢复（进程继续）"
-            # 更新时间戳用于状态列表显示。
-            worker.updated_at = time.time()
+            # 使用状态锁保护内存状态更新，避免和状态刷新并发冲突。
+            with self._state_lock:
+                # 立即更新状态快照为运行中。
+                worker.last_state = "running"
+                # 更新状态详情文案。
+                worker.last_detail = "已即时恢复（进程继续）"
+                # 更新时间戳用于状态列表显示。
+                worker.updated_at = time.time()
             # 记录即时恢复日志。
             log.info("即时恢复成功", serial=serial, pid=pid)
             return f"{serial}: 已即时恢复"
@@ -635,7 +712,7 @@ class DeviceProcessManager:
         # 给指定设备子进程发送控制命令。
         self.drain_events()
         self._cleanup_dead(serial)
-        worker = self._workers.get(serial)
+        worker = self._get_worker(serial)
         if not worker or not worker.process.is_alive():
             log.warning("发送命令失败，设备未运行", serial=serial, command=command)
             return f"{serial}: 未运行"
@@ -652,7 +729,7 @@ class DeviceProcessManager:
 
     def send_command_all(self, command: str) -> list[str]:
         # 广播命令给所有运行中的设备。
-        return [self.send_command(serial, command) for serial in sorted(self._workers.keys())]
+        return [self.send_command(serial, command) for serial in self._snapshot_worker_serials()]
 
     def _try_send_stop(self, worker: WorkerHandle, serial: str) -> None:
         # 给子进程发送 stop 命令并设置 stop_event，使用双保险提高退出成功率。
@@ -717,7 +794,7 @@ class DeviceProcessManager:
     def stop_worker(self, serial: str, timeout_sec: float | None = None) -> str:
         # 停止指定设备子进程：先优雅停止，超时再强杀。
         self.drain_events()
-        worker = self._workers.get(serial)
+        worker = self._get_worker(serial)
         if not worker:
             # 即使进程句柄不存在，也尝试做一次账号释放，防止残留绑定。
             self._release_device_account(serial=serial, reason="stop_worker_without_handle")
@@ -775,7 +852,7 @@ class DeviceProcessManager:
     def stop_all(self, timeout_sec: float | None = None) -> list[str]:
         # 停止全部子进程：并发发 stop + 统一等待，避免多设备串行超时导致总耗时过长。
         self.drain_events()
-        serials = sorted(self._workers.keys())
+        serials = self._snapshot_worker_serials()
         if not serials:
             # 没有可停止进程时返回明确提示，避免 GUI 侧看起来“无反应”。
             return ["当前无运行中的设备进程"]
@@ -786,7 +863,7 @@ class DeviceProcessManager:
 
         # 第一阶段：并发发送 stop 请求。
         for serial in serials:
-            worker = self._workers.get(serial)
+            worker = self._get_worker(serial)
             if not worker:
                 continue
             if worker.process.is_alive():
@@ -794,23 +871,35 @@ class DeviceProcessManager:
 
         # 第二阶段：统一等待优雅退出。
         deadline = time.time() + grace_timeout_sec
-        alive_serials = {
-            serial for serial in serials if self._workers.get(serial) and self._workers[serial].process.is_alive()
-        }
+        # 初始化“优雅等待后仍存活”的设备集合。
+        alive_serials: set[str] = set()
+        # 首轮扫描当前仍存活的 worker。
+        for serial in serials:
+            # 读取当前设备 worker 句柄。
+            worker = self._get_worker(serial)
+            # 仅把仍存活的 worker 加入等待集合。
+            if worker and worker.process.is_alive():
+                alive_serials.add(serial)
         while alive_serials and time.time() < deadline:
             for serial in list(alive_serials):
-                worker = self._workers.get(serial)
+                worker = self._get_worker(serial)
                 if not worker or not worker.process.is_alive():
                     alive_serials.discard(serial)
             if alive_serials:
                 time.sleep(0.05)
 
         # 第三阶段：并发 terminate 仍存活的进程，并统一等待。
-        alive_after_grace = {
-            serial for serial in serials if self._workers.get(serial) and self._workers[serial].process.is_alive()
-        }
+        # 初始化“优雅等待后仍存活”的设备集合。
+        alive_after_grace: set[str] = set()
+        # 再次扫描当前仍存活的 worker。
+        for serial in serials:
+            # 读取当前设备 worker 句柄。
+            worker = self._get_worker(serial)
+            # 仅把仍存活的 worker 加入 terminate 阶段集合。
+            if worker and worker.process.is_alive():
+                alive_after_grace.add(serial)
         for serial in alive_after_grace:
-            worker = self._workers.get(serial)
+            worker = self._get_worker(serial)
             if worker and worker.process.is_alive():
                 # terminate 前先清理 worker 子进程树，避免 adb/pocoservice 残留。
                 self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_all_before_terminate")
@@ -819,7 +908,7 @@ class DeviceProcessManager:
         alive_after_terminate = set(alive_after_grace)
         while alive_after_terminate and time.time() < terminate_deadline:
             for serial in list(alive_after_terminate):
-                worker = self._workers.get(serial)
+                worker = self._get_worker(serial)
                 if not worker or not worker.process.is_alive():
                     alive_after_terminate.discard(serial)
             if alive_after_terminate:
@@ -827,7 +916,7 @@ class DeviceProcessManager:
 
         # 第四阶段：并发 kill terminate 后仍存活的进程，并统一等待。
         for serial in alive_after_terminate:
-            worker = self._workers.get(serial)
+            worker = self._get_worker(serial)
             if worker and worker.process.is_alive():
                 # kill 前再次清理 worker 子进程树，避免孤儿 adb 进程残留。
                 self._kill_worker_process_tree(worker=worker, serial=serial, reason="stop_all_before_kill")
@@ -836,7 +925,7 @@ class DeviceProcessManager:
         alive_after_kill = set(alive_after_terminate)
         while alive_after_kill and time.time() < kill_deadline:
             for serial in list(alive_after_kill):
-                worker = self._workers.get(serial)
+                worker = self._get_worker(serial)
                 if not worker or not worker.process.is_alive():
                     alive_after_kill.discard(serial)
             if alive_after_kill:
@@ -845,7 +934,7 @@ class DeviceProcessManager:
         # 第五阶段：回收资源并产出每个设备的停止结果。
         messages: list[str] = []
         for serial in serials:
-            worker = self._workers.get(serial)
+            worker = self._get_worker(serial)
             if not worker:
                 continue
 
@@ -893,27 +982,41 @@ class DeviceProcessManager:
     def status(self) -> list[dict[str, str | int | float]]:
         # 返回当前所有子进程状态快照，供 CLI/GUI 展示。
         self.drain_events()
+        # 打开短连接，避免后台线程复用同一 SQLite 连接导致异常。
+        user_db: UserDB | None = None
         rows: list[dict[str, str | int | float]] = []
-        for serial, worker in sorted(self._workers.items()):
-            # 从 t_user.device 反查当前设备占用账号。
-            user_row = self.user_db.get_user_by_device(serial)
-            email_account = str(user_row.get("email_account", "")).strip() if user_row else ""
-            rows.append(
-                {
-                    # 设备序列号。
-                    "serial": serial,
-                    # 进程 PID。
-                    "pid": worker.process.pid or -1,
-                    # 是否存活。
-                    "alive": "yes" if worker.process.is_alive() else "no",
-                    # 最近状态。
-                    "state": worker.last_state,
-                    # 最近详情。
-                    "detail": worker.last_detail,
-                    # 当前设备占用邮箱。
-                    "email_account": email_account,
-                    # 最近更新时间戳。
-                    "updated_at": worker.updated_at,
-                }
-            )
+        try:
+            # 打开短连接，供状态快照阶段读取设备占用邮箱。
+            user_db = self._open_user_db(connect_timeout_sec=0.6, busy_timeout_ms=600)
+            for serial, worker in self._snapshot_workers():
+                # 从 t_user.device 反查当前设备占用账号。
+                user_row = user_db.get_user_by_device(serial)
+                email_account = str(user_row.get("email_account", "")).strip() if user_row else ""
+                rows.append(
+                    {
+                        # 设备序列号。
+                        "serial": serial,
+                        # 进程 PID。
+                        "pid": worker.process.pid or -1,
+                        # 是否存活。
+                        "alive": "yes" if worker.process.is_alive() else "no",
+                        # 最近状态。
+                        "state": worker.last_state,
+                        # 最近详情。
+                        "detail": worker.last_detail,
+                        # 当前设备占用邮箱。
+                        "email_account": email_account,
+                        # 最近更新时间戳。
+                        "updated_at": worker.updated_at,
+                    }
+                )
+        finally:
+            # 短连接使用后立即关闭，避免连接泄漏。
+            if user_db is not None:
+                try:
+                    # 关闭状态快照读取连接。
+                    user_db.close()
+                except Exception:
+                    # 关闭失败只记日志，不影响状态返回。
+                    log.exception("关闭状态快照数据库连接失败")
         return rows

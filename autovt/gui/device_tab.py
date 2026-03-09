@@ -59,6 +59,8 @@ class DeviceTab:
         self._last_log_load_mono_ts: float = 0.0
         # 是否跟随最新日志到底部；用户手动上滑后会临时关闭。
         self._logs_follow_latest = True
+        # 是否正在执行日志清空任务，避免重复并发改写日志文件。
+        self._clearing_logs = False
 
         self.summary_text: ft.Text | None = None
         self.last_refresh_text: ft.Text | None = None
@@ -111,8 +113,12 @@ class DeviceTab:
             # 黑底场景下使用半透明白字。
             color=ft.Colors.WHITE70,
         )
-        # 构建设备页时先加载一次日志，避免初次进入为空白。
-        self._refresh_logs_view()
+        try:
+            # 构建设备页时异步加载一次日志，避免首次进入同步扫盘卡住界面。
+            self.page.run_task(self._refresh_logs_view_async, True)
+        except Exception:
+            # 调度失败时记录日志，避免初次进入因日志任务异常而无反馈。
+            log.exception("调度设备页初始日志加载任务失败")
 
         # 顶部操作区改为可换行 Row，按钮按内容宽度展示，避免被网格拉得过长。
         top_actions = ft.Row(
@@ -367,8 +373,8 @@ class DeviceTab:
 
             # 记录状态查询阶段起点。
             step_started_at = time.monotonic()
-            # 状态读取保持在主线程，避免跨线程访问 manager.user_db 连接。
-            status_rows = self.manager.status()
+            # 在线程池中读取状态快照，避免事件循环线程被设备状态查询阻塞。
+            status_rows = await asyncio.to_thread(self.manager.status)
             # 计算状态查询阶段耗时。
             status_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
 
@@ -749,6 +755,27 @@ class DeviceTab:
         # 渲染日志记录到日志面板。
         self._render_logs_records(records)
 
+    async def _refresh_logs_view_async(self, update_page: bool = False) -> None:
+        """在线程池中读取日志列表，避免同步扫盘阻塞 GUI。"""
+        # 日志容器尚未初始化时直接返回。
+        if not self.log_list_column:
+            return
+        try:
+            # 在线程池中读取最新日志记录，避免主线程直接扫描日志文件。
+            records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
+            # 回填日志缓存，便于自动刷新节流直接复用。
+            self._cached_log_records = list(records)
+            # 更新最近一次日志读取时间，避免后续自动刷新马上再次扫盘。
+            self._last_log_load_mono_ts = time.monotonic()
+            # 把日志记录渲染到界面。
+            self._render_logs_records(records)
+            # 需要时提交一次页面刷新，确保初始日志尽快可见。
+            if update_page:
+                self.page.update()
+        except Exception:
+            # 记录异步日志加载异常，避免用户误以为日志面板空白就是没有日志。
+            log.exception("异步刷新设备日志视图失败")
+
     def _render_logs_records(self, records: list[tuple[str, str]]) -> None:
         """把日志记录渲染到日志面板。"""
         # 日志容器尚未初始化时直接返回。
@@ -819,17 +846,22 @@ class DeviceTab:
 
     def _handle_clear_logs(self, _e: ft.ControlEvent) -> None:
         """点击清空按钮时，清空 open_settings 日志并刷新日志框。"""
-        # 执行清空逻辑并返回清理条数。
-        cleared_count = self._clear_open_settings_logs()
-        # 清空后立即刷新日志面板。
-        self._refresh_logs_view()
         try:
-            # 提交界面刷新，确保日志列表立即变化。
-            self.page.update()
+            # 已有清空任务执行中时直接提示，避免重复并发改写日志文件。
+            if self._clearing_logs:
+                self._show_snack("日志清空执行中，请等待当前操作完成。")
+                return
+            # 标记清空任务已启动，避免重复点击并发执行。
+            self._clearing_logs = True
+            # 在后台任务中执行日志清空，避免同步文件改写阻塞 UI。
+            self.page.run_task(self._clear_logs_async)
         except Exception:
-            log.exception("清空日志后刷新页面失败")
-        # 反馈清空结果。
-        self._show_snack(f"已清空 {cleared_count} 条日志。")
+            # 调度失败时立即复位状态，避免后续按钮永久不可用。
+            self._clearing_logs = False
+            # 记录调度异常，便于定位 Flet 任务问题。
+            log.exception("调度清空日志任务失败")
+            # 给用户返回可读错误提示。
+            self._show_snack("清空日志失败，请稍后重试。")
 
     def _clear_open_settings_logs(self) -> int:
         """清空 log/json 目录下 component=task.open_settings 对应日志行。"""
@@ -875,8 +907,34 @@ class DeviceTab:
                 log.exception("清空日志文件失败", path=str(path))
         # 清空缓存，避免复制按钮复制旧数据。
         self._latest_log_messages = []
+        # 清空日志缓存记录，避免自动刷新继续展示旧数据。
+        self._cached_log_records = []
+        # 重置最近一次日志读取时间，确保下次刷新会重新扫盘。
+        self._last_log_load_mono_ts = 0.0
         # 返回总清空条数给 UI 展示。
         return cleared_count
+
+    async def _clear_logs_async(self) -> None:
+        """在线程池中清空日志并回填最新视图，避免同步文件改写阻塞 GUI。"""
+        try:
+            # 在线程池中执行日志清空动作，避免阻塞 Flet 事件线程。
+            cleared_count = await asyncio.to_thread(self._clear_open_settings_logs)
+            # 清空后在线程池中重新读取最新日志，保持面板状态一致。
+            records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
+            # 把清空后的记录渲染到日志面板。
+            self._render_logs_records(records)
+            # 提交界面刷新，确保日志列表立即变化。
+            self.page.update()
+            # 反馈清空结果。
+            self._show_snack(f"已清空 {cleared_count} 条日志。")
+        except Exception:
+            # 记录异步清空异常，便于排查文件权限或日志格式问题。
+            log.exception("异步清空日志失败")
+            # 给用户返回可读失败提示。
+            self._show_snack("清空日志失败，请稍后重试。")
+        finally:
+            # 无论成功失败都复位清空标记，保证后续可再次操作。
+            self._clearing_logs = False
 
     async def _copy_logs_to_clipboard_async(self) -> None:
         """复制当前日志列表到系统剪贴板。"""
