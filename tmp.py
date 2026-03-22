@@ -225,6 +225,16 @@ poco("fr.vinted:id/view_input_value").click()
 
 
 
+poco("android.widget.LinearLayout").offspring("android.view.ViewGroup").child("android.webkit.WebView").offspring("captcha__frame__bottom").child("android.view.View")[1].child("android.widget.TextView")[0].click()
+
+
+
+Template(r"tpl1774194537953.png", record_pos=(-0.306, -0.085), resolution=(1080, 2340))
+
+poco("android:id/navigationBarBackground").swipe([-0.1789, -0.4832])
+
+Template(r"tpl1774195425217.png", record_pos=(-0.255, -0.295), resolution=(1080, 2340))
+
 
 
 

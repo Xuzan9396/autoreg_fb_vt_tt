@@ -14,6 +14,8 @@ from airtest.core.api import G
 from airtest.core.api import loop_find
 # 导入失败截图方法，便于异常排查页面状态。
 from airtest.core.api import snapshot
+# 导入找图未命中异常，便于区分模板未命中和连接断开。
+from airtest.core.error import TargetNotFoundError
 # 导入设置系统剪贴板方法，便于配合界面“粘贴”按钮使用。
 from airtest.core.api import set_clipboard
 # 导入等待方法，便于页面稳定后继续执行。
@@ -357,34 +359,166 @@ class VintedTask(OpenSettingsTask):
         self.log.info("开始执行 Vinted 滑块识别", user_email=self.user_email)
         # 使用异常保护整个滑块识别流程。
         try:
-            # 构建 Vinted 滑块模板对象。
-            slider_template = self._build_asset_template("images", "fr", "vinted", "slider.png")
-            # 记录当前使用的滑块模板路径，便于排查打包资源问题。
-            self.log.info("已构建 Vinted 滑块模板", target="Vinted-滑块模板", image_path=slider_template.filename)
-            # 使用异常保护 10 秒找图过程，便于区分未命中和轨迹执行失败。
-            try:
-                # 最多等待 10 秒识别滑块起点。
-                slider_start = loop_find(slider_template, timeout=40, interval=1)
-                sleep(5)
-            # 捕获找图阶段异常并按“未命中”处理。
-            except Exception as exc:
-                # 连接异常走统一恢复链路。
-                if self._is_poco_disconnect_error(exc):
-                    # 统一记录异常并尝试恢复连接。
-                    self._handle_safe_action_exception("vinted_slider_find", "Vinted-滑块识别", exc)
-                    # 当前步骤若仍为连接异常，则抛给 worker 做重建。
-                    self._raise_runtime_disconnect_to_worker("vinted_slider_find", "Vinted-滑块识别", exc)
-                # 记录滑块未命中日志。
-                self.log.warning("Vinted 滑块未找到", target="Vinted-滑块识别", error=str(exc), timeout_sec=10)
-                # 返回 False 表示当前未识别到滑块。
-                return False
-            # 读取当前设备屏幕分辨率，便于后续计算滑动终点。
+            # 定义左侧拖动块在 1080x2340 基准分辨率下的预期位置，避免纯箭头误识别到右侧目标箭头。
+            slider_left_record_pos = (-0.318, -0.102)
+            # 初始化滑块模板候选列表，优先走新的箭头模板，再回退旧模板。
+            slider_template_candidates = [
+                {"filename": "slider_arrow.png", "resolution": (1080, 2340), "record_pos": slider_left_record_pos},
+                {"filename": "slider_arrow.png", "record_pos": slider_left_record_pos},
+                {"filename": "slider.png", "resolution": (1080, 2340), "record_pos": slider_left_record_pos},
+                {"filename": "slider.png", "record_pos": slider_left_record_pos},
+            ]
+            # 尝试预读取当前设备分辨率，便于后续日志输出。
             screen_width, screen_height = G.DEVICE.get_current_resolution()
+            # 初始化当前命中的模板对象。
+            slider_template = None
+            # 初始化当前命中的滑块起点坐标。
+            slider_start = None
+            # 初始化最近一次找图异常，便于全部候选失败时统一抛出。
+            last_find_error: Exception | None = None
+            # 初始化最后一次尝试的候选序号，便于失败日志定位。
+            last_candidate_index = 0
+            # 初始化实际命中的候选序号，便于成功日志定位。
+            matched_candidate_index = 0
+            # 逐个尝试滑块模板候选，兼容不同分辨率设备。
+            for candidate_index, template_options in enumerate(slider_template_candidates, start=1):
+                # 读取当前候选使用的模板文件名，缺失时回退旧模板名。
+                template_filename = str(template_options.get("filename", "slider.png")).strip() or "slider.png"
+                # 复制当前候选参数，避免把文件名字段透传给 _build_asset_template。
+                build_options = dict(template_options)
+                # 从构建参数中移除文件名字段，只保留 Template 需要的参数。
+                build_options.pop("filename", None)
+                # 按当前候选参数构建滑块模板对象。
+                slider_template = self._build_asset_template(
+                    "images",
+                    "fr",
+                    "vinted",
+                    template_filename,
+                    **build_options,
+                )
+                # 记录当前候选序号，便于失败时回写日志。
+                last_candidate_index = candidate_index
+                # 记录当前使用的滑块模板路径和参数，便于排查打包资源问题。
+                self.log.info(
+                    "已构建 Vinted 滑块模板",
+                    target="Vinted-滑块模板",
+                    candidate_index=candidate_index,
+                    candidate_total=len(slider_template_candidates),
+                    image_path=slider_template.filename,
+                    template_filename=template_filename,
+                    template_record_pos=slider_template.record_pos,
+                    template_resolution=slider_template.resolution,
+                    template_threshold=slider_template.threshold,
+                )
+                # 使用异常保护当前候选找图过程，命中后立即结束候选循环。
+                try:
+                    # 最多等待 40 秒识别当前候选的滑块起点。
+                    slider_start = loop_find(slider_template, timeout=40, interval=1)
+                    # 当前模板是纯箭头时，右侧目标框也会被误识别，需强制校验起点落在左半区。
+                    if template_filename == "slider_arrow.png" and int(slider_start[0]) >= int(screen_width * 0.5):
+                        # 记录当前命中点落在右半区的告警日志，明确说明这是误识别到目标箭头。
+                        self.log.warning(
+                            "Vinted 滑块命中点落在右半区，判定为目标箭头误识别，继续尝试下一候选",
+                            target="Vinted-滑块识别",
+                            candidate_index=candidate_index,
+                            candidate_total=len(slider_template_candidates),
+                            template_filename=template_filename,
+                            template_resolution=slider_template.resolution,
+                            template_threshold=slider_template.threshold,
+                            slider_start=slider_start,
+                            screen_width=screen_width,
+                            screen_height=screen_height,
+                        )
+                        # 主动抛出未命中异常，让当前候选按“继续尝试下一候选”处理。
+                        raise TargetNotFoundError(
+                            f"Arrow template matched right-side target area: {slider_start}"
+                        )
+                    # 当前候选命中时记录候选序号，便于成功日志回写。
+                    matched_candidate_index = candidate_index
+                    # 当前候选命中时结束循环，避免继续尝试其他模板。
+                    break
+                # 捕获单个候选找图异常，未命中时继续尝试下一个候选。
+                except Exception as exc:
+                    # 连接异常直接走统一恢复链路，避免误记成模板问题。
+                    if self._is_poco_disconnect_error(exc):
+                        # 统一记录异常并尝试恢复连接。
+                        self._handle_safe_action_exception("vinted_slider_find", "Vinted-滑块识别", exc)
+                        # 当前步骤若仍为连接异常，则抛给 worker 做重建。
+                        self._raise_runtime_disconnect_to_worker("vinted_slider_find", "Vinted-滑块识别", exc)
+                    # 记录最近一次异常，便于全部候选失败时统一处理。
+                    last_find_error = exc
+                    # 模板未命中时记录轻量告警日志，并继续尝试下一个候选。
+                    if isinstance(exc, TargetNotFoundError):
+                        self.log.warning(
+                            "Vinted 滑块模板未命中，继续尝试下一候选",
+                            target="Vinted-滑块识别",
+                            candidate_index=candidate_index,
+                            candidate_total=len(slider_template_candidates),
+                            template_filename=template_filename,
+                            template_record_pos=slider_template.record_pos,
+                            template_resolution=slider_template.resolution,
+                            template_threshold=slider_template.threshold,
+                            screen_width=screen_width,
+                            screen_height=screen_height,
+                            timeout_sec=40,
+                            error=str(exc),
+                        )
+                        continue
+                    # 非断连且非模板未命中的异常，也记录后继续尝试下一候选。
+                    self.log.warning(
+                        "Vinted 滑块模板识别异常，继续尝试下一候选",
+                        target="Vinted-滑块识别",
+                        candidate_index=candidate_index,
+                        candidate_total=len(slider_template_candidates),
+                        template_filename=template_filename,
+                        template_record_pos=slider_template.record_pos,
+                        template_resolution=slider_template.resolution,
+                        template_threshold=slider_template.threshold,
+                        screen_width=screen_width,
+                        screen_height=screen_height,
+                        timeout_sec=40,
+                        error=str(exc),
+                    )
+                    # 记录最近一次异常，便于全部候选失败时统一抛出。
+                    last_find_error = exc
+            # 全部候选都未命中时，抛出最后一次异常进入统一失败处理。
+            if slider_start is None:
+                # 最近一次异常是模板未命中时，按普通失败返回 False。
+                if isinstance(last_find_error, TargetNotFoundError):
+                    self.log.warning(
+                        "Vinted 滑块未找到",
+                        target="Vinted-滑块识别",
+                        candidate_index=last_candidate_index,
+                        candidate_total=len(slider_template_candidates),
+                        template_filename=getattr(slider_template, "filename", ""),
+                        template_record_pos=getattr(slider_template, "record_pos", None),
+                        template_resolution=getattr(slider_template, "resolution", ()),
+                        template_threshold=getattr(slider_template, "threshold", None),
+                        screen_width=screen_width,
+                        screen_height=screen_height,
+                        timeout_sec=40,
+                        error=str(last_find_error),
+                    )
+                    # 返回 False 表示当前未识别到滑块。
+                    return False
+                # 最近一次找图异常存在时优先抛出该异常。
+                if last_find_error is not None:
+                    raise last_find_error
+                # 理论上不会走到这里，仍补兜底异常避免无声失败。
+                raise RuntimeError("Vinted 滑块模板候选为空或未执行")
+            # 找图成功后等待页面稍微稳定，再执行后续滑动。
+            sleep(5)
             # 记录当前命中的滑块起点和屏幕分辨率。
             self.log.info(
                 "Vinted 滑块识别成功",
                 target="Vinted-滑块识别",
+                candidate_index=matched_candidate_index,
+                candidate_total=len(slider_template_candidates),
                 slider_start=slider_start,
+                template_filename=getattr(slider_template, "filename", ""),
+                template_record_pos=getattr(slider_template, "record_pos", None),
+                template_resolution=getattr(slider_template, "resolution", ()),
+                template_threshold=getattr(slider_template, "threshold", None),
                 screen_width=screen_width,
                 screen_height=screen_height,
             )
