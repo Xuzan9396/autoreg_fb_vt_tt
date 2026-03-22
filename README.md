@@ -1,6 +1,9 @@
 # autovt
 
-git tag -a v1.1.4 -m "修改" &&  git push origin v1.1.4
+vpn检测隐藏: https://github.com/Xposed-Modules-Repo/me.hoshino.novpndetect
+狐狸面具: t.me/KitsuneUfork
+
+git tag -a v1.1.5 -m "修改" &&  git push origin v1.1.5
 
 uv run python main.py
 uv run python test.py facebook_run_all

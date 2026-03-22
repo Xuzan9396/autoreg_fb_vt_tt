@@ -21,6 +21,7 @@ except Exception:
 
 from autovt.adb import list_online_serials, resolve_adb_bin
 from autovt.logs import get_logger
+from autovt.multiproc.process_guard import cleanup_autovt_helper_processes, collect_autovt_helper_processes
 from autovt.multiproc.worker import worker_main
 from autovt.settings import ADB_SERVER_ADDR, WORKER_STOP_FORCE_TIMEOUT_SEC, WORKER_STOP_GRACE_TIMEOUT_SEC
 from autovt.userdb import UserDB
@@ -32,10 +33,24 @@ WORKER_STARTUP_PROBE_SEC = 0.4
 FACEBOOK_PACKAGE_NAME = "com.facebook.katana"
 # Facebook 安装包相对路径（安装时使用）。
 FACEBOOK_APK_RELATIVE_PATH = Path("apks") / "facebook.apk"
+# Vinted 应用包名（卸载时使用）。
+VINTED_PACKAGE_NAME = "fr.vinted"
+# Vinted 安装包相对路径（安装时使用）。
+VINTED_APK_RELATIVE_PATH = Path("apks") / "vinted.apk"
 # Yosemite 输入法包名（安装后用于识别应用）。
 YOSEMITE_PACKAGE_NAME = "com.netease.nie.yosemite"
 # Yosemite 安装包相对路径（airtest 资源目录）。
 YOSEMITE_APK_RELATIVE_PATH = Path("airtest") / "core" / "android" / "static" / "apks" / "Yosemite.apk"
+# 允许启动任务使用的注册方式集合。
+VALID_REGISTER_MODES = {"facebook", "vinted"}
+
+
+def _normalize_register_mode(register_mode: str) -> str:
+    """标准化注册方式文本，统一做空白清理和小写化。"""
+    # 把输入值转成字符串并清理前后空白。
+    normalized_value = str(register_mode or "").strip().lower()
+    # 返回标准化后的注册方式。
+    return normalized_value
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -101,6 +116,8 @@ class DeviceProcessManager:
         # 先保证子进程 import 路径可用，避免打包态 worker 秒退。
         _ensure_spawn_pythonpath()
 
+        # 预先解析当前项目使用的 adb 路径，供后续辅助进程清理复用。
+        self._adb_bin = resolve_adb_bin()
         # 强制使用 spawn：多平台行为更一致，尤其是 macOS。
         self._ctx = mp.get_context("spawn")
         # 子进程自动轮询间隔。
@@ -111,13 +128,132 @@ class DeviceProcessManager:
         self._workers: dict[str, WorkerHandle] = {}
         # 为跨线程 GUI 操作准备递归锁，避免后台动作和前台刷新并发改状态表。
         self._state_lock = threading.RLock()
+        # 为 close 幂等控制准备独立锁，避免 GUI/window/signal 重复收口。
+        self._close_lock = threading.RLock()
+        # 标记当前 manager 是否已经执行过最终 close。
+        self._closed = False
         # 缓存数据库文件路径，后续按需创建短连接，避免跨线程复用同一 SQLite 连接。
         self._user_db_path = UserDB().path
+        # manager 初始化完成后先清一次历史孤儿辅助进程，避免新 GUI 接上旧残留。
+        self._cleanup_helper_processes(reason="manager_init_orphan_cleanup", orphan_only=True)
         log.info("DeviceProcessManager 初始化完成", loop_interval_sec=loop_interval_sec, user_db_path=str(self._user_db_path))
 
     def close(self) -> None:
-        # 当前 manager 改为按需创建短连接，这里保留兼容入口并记录调试日志。
+        # 使用幂等锁保护 close，避免多个退出入口重复回收。
+        with self._close_lock:
+            # 已执行过 close 时直接返回，避免重复清理同一批进程。
+            if self._closed:
+                # 记录幂等命中日志，便于排查重复退出链路。
+                log.debug("DeviceProcessManager.close 重复调用，已跳过")
+                # 结束本次 close。
+                return
+            # 标记 close 已执行，后续调用直接走幂等返回。
+            self._closed = True
+        # close 作为最终兜底入口，再做一次全局辅助进程清理。
+        self._cleanup_helper_processes(reason="manager_close_final_cleanup", orphan_only=False)
+        # 记录 close 完成日志，便于排查最终收口是否执行。
         log.debug("DeviceProcessManager.close 调用完成（当前无常驻 SQLite 连接）")
+
+    def _format_helper_processes_for_log(self, processes: list[dict[str, object]]) -> list[str]:
+        """把辅助进程列表压缩成稳定可读的日志片段。"""
+        # 初始化压缩结果列表。
+        items: list[str] = []
+        # 逐个拼接关键信息，方便日志快速定位残留来源。
+        for process in processes:
+            # 读取当前进程 pid。
+            pid = int(process.get("pid", 0) or 0)
+            # 读取当前进程父 pid。
+            ppid = int(process.get("ppid", 0) or 0)
+            # 读取当前进程 serial。
+            serial = str(process.get("serial", "") or "").strip()
+            # 读取当前进程命中关键字列表。
+            matched_tokens = ",".join(str(token) for token in process.get("matched_tokens", []) if str(token).strip())
+            # 读取命令行文本。
+            cmdline_text = str(process.get("cmdline_text", "") or "").strip()
+            # 组装当前进程摘要。
+            items.append(f"pid={pid} ppid={ppid} serial={serial or '-'} tokens={matched_tokens or '-'} cmd={cmdline_text}")
+        # 返回压缩后的进程摘要列表。
+        return items
+
+    def _collect_helper_processes(self, serial: str = "", orphan_only: bool = False) -> list[dict[str, object]]:
+        """读取当前 autovt 辅助进程快照，供启动前诊断和停机后复检复用。"""
+        # 调用公共守卫模块扫描辅助进程。
+        return collect_autovt_helper_processes(
+            adb_bin=self._adb_bin,
+            serial=serial,
+            orphan_only=orphan_only,
+        )
+
+    def _log_helper_cleanup_result(self, result: dict[str, object]) -> None:
+        """统一记录辅助进程清理结果。"""
+        # 读取命中的辅助进程数量。
+        matched = int(result.get("matched", 0) or 0)
+        # 读取 kill 后仍残留的进程列表。
+        remaining = list(result.get("remaining", []) or [])
+        # 没有命中且没有残留时无需刷日志。
+        if matched <= 0 and not remaining:
+            return
+        # 把命中进程压缩成日志友好的文本。
+        process_items = self._format_helper_processes_for_log(list(result.get("processes", []) or []))
+        # 命中时先记录一次清理结果摘要。
+        log.warning(
+            "辅助进程清理已执行",
+            reason=str(result.get("reason", "") or "").strip(),
+            serial=str(result.get("serial", "") or "").strip(),
+            orphan_only=bool(result.get("orphan_only", False)),
+            matched=matched,
+            terminated=int(result.get("terminated", 0) or 0),
+            killed=int(result.get("killed", 0) or 0),
+            failed=int(result.get("failed", 0) or 0),
+            processes=process_items,
+        )
+        # kill 后仍有残留时升级为错误日志，便于快速定位。
+        if remaining:
+            # 记录剩余残留进程详情。
+            log.error(
+                "辅助进程清理后仍有残留",
+                reason=str(result.get("reason", "") or "").strip(),
+                serial=str(result.get("serial", "") or "").strip(),
+                remaining=self._format_helper_processes_for_log(remaining),
+            )
+
+    def _cleanup_helper_processes(self, serial: str = "", orphan_only: bool = False, reason: str = "") -> dict[str, object]:
+        """清理 autovt 自有辅助进程，并统一记录结果日志。"""
+        # 调用公共守卫模块执行辅助进程清理。
+        result = cleanup_autovt_helper_processes(
+            adb_bin=self._adb_bin,
+            log=log,
+            serial=serial,
+            orphan_only=orphan_only,
+            reason=reason,
+        )
+        # 统一输出清理结果日志。
+        self._log_helper_cleanup_result(result)
+        # 返回清理结果给调用方继续决策。
+        return result
+
+    def _merge_helper_cleanup_results(
+        self,
+        first: dict[str, object] | None,
+        second: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """合并同一阶段两次辅助进程清理结果，便于 stop 路径汇总展示。"""
+        # 统一把空值转成空字典，简化后续读取。
+        first_result = dict(first or {})
+        # 统一把空值转成空字典，简化后续读取。
+        second_result = dict(second or {})
+        # 读取第二次复检残留，优先以更晚结果为准。
+        final_remaining = list(second_result.get("remaining", []) or first_result.get("remaining", []) or [])
+        # 返回汇总后的清理结果。
+        return {
+            "reason": str(second_result.get("reason", "") or first_result.get("reason", "") or "").strip(),
+            "serial": str(second_result.get("serial", "") or first_result.get("serial", "") or "").strip(),
+            "matched": int(first_result.get("matched", 0) or 0) + int(second_result.get("matched", 0) or 0),
+            "terminated": int(first_result.get("terminated", 0) or 0) + int(second_result.get("terminated", 0) or 0),
+            "killed": int(first_result.get("killed", 0) or 0) + int(second_result.get("killed", 0) or 0),
+            "failed": int(first_result.get("failed", 0) or 0) + int(second_result.get("failed", 0) or 0),
+            "remaining": final_remaining,
+        }
 
     def _open_user_db(self, connect_timeout_sec: float = 1.2, busy_timeout_ms: int = 1200) -> UserDB:
         """创建一个短生命周期数据库连接，避免跨线程复用同一 SQLite 连接。"""
@@ -217,6 +353,36 @@ class DeviceProcessManager:
         # 全部候选失效时，抛出明确错误，便于用户定位。
         raise FileNotFoundError(
             "未找到 facebook.apk（期望外置在可执行文件同级 apks 目录），请确认文件存在："
+            + " / ".join(str(path) for path in candidates)
+        )
+
+    def _resolve_vinted_apk_path(self) -> Path:
+        """解析 vinted.apk 路径，优先使用“可执行文件同级 apks”外置目录。"""
+        # 保存候选路径，按优先级依次尝试。
+        candidates: list[Path] = []
+        # 解析当前可执行文件所在目录（源码模式通常是 Python 所在目录，打包模式是 exe/app 内部目录）。
+        exe_dir = Path(sys.executable).resolve().parent
+        # 候选 1：可执行文件同级目录下的 apks/vinted.apk。
+        candidates.append(exe_dir / VINTED_APK_RELATIVE_PATH)
+        # 候选 2：可执行文件上一级目录下的 apks/vinted.apk。
+        candidates.append(exe_dir.parent / VINTED_APK_RELATIVE_PATH)
+        # 候选 3：macOS .app 场景下，app 包外层目录同级 apks/vinted.apk。
+        try:
+            candidates.append(exe_dir.parents[2] / VINTED_APK_RELATIVE_PATH)
+        except Exception:
+            # 非 .app 目录结构时忽略该候选。
+            pass
+        # 候选 4：当前工作目录下的 apks/vinted.apk。
+        candidates.append(Path.cwd() / VINTED_APK_RELATIVE_PATH)
+        # 候选 5：源码运行路径（项目根目录）下的 apks/vinted.apk。
+        candidates.append(Path(__file__).resolve().parents[2] / VINTED_APK_RELATIVE_PATH)
+        # 逐个候选检查文件是否存在。
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        # 全部候选失效时，抛出明确错误，便于用户定位。
+        raise FileNotFoundError(
+            "未找到 vinted.apk（期望外置在可执行文件同级 apks 目录），请确认文件存在："
             + " / ".join(str(path) for path in candidates)
         )
 
@@ -385,6 +551,80 @@ class DeviceProcessManager:
         )
         return f"{serial}: Facebook 安装失败（{output_text or f'returncode={result.returncode}'})"
 
+    def uninstall_vinted_for_device(self, serial: str) -> str:
+        """卸载指定设备上的 Vinted 应用。"""
+        # 设备正在执行任务时，拒绝卸载以避免和 worker 争用设备。
+        if self._is_worker_running(serial):
+            return f"{serial}: 设备任务运行中，请先停止该设备后再执行一键删除VT"
+        # 先尝试停止 Vinted 进程，降低卸载失败概率。
+        try:
+            self._run_adb_for_serial(serial=serial, args=["shell", "am", "force-stop", VINTED_PACKAGE_NAME], timeout_sec=8.0)
+        except Exception:
+            log.warning("卸载前停止 Vinted 进程失败，继续执行卸载", serial=serial)
+        # 执行卸载命令。
+        try:
+            result = self._run_adb_for_serial(serial=serial, args=["uninstall", VINTED_PACKAGE_NAME], timeout_sec=35.0)
+        except Exception as exc:
+            log.exception("卸载 Vinted 执行异常", serial=serial, error=str(exc))
+            return f"{serial}: 卸载失败（执行异常）{exc}"
+        # 解析命令输出。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 success 时判定成功。
+        if "success" in output_lower:
+            log.info("Vinted 卸载成功", serial=serial, output=output_text)
+            return f"{serial}: Vinted 卸载成功"
+        # 未安装场景按可接受结果返回。
+        if "unknown package" in output_lower or "not installed" in output_lower:
+            log.info("Vinted 未安装，按成功处理", serial=serial, output=output_text)
+            return f"{serial}: Vinted 未安装"
+        # 非 success 视为失败并返回简化原因。
+        log.error(
+            "Vinted 卸载失败",
+            serial=serial,
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return f"{serial}: Vinted 卸载失败（{output_text or f'returncode={result.returncode}'})"
+
+    def install_vinted_for_device(self, serial: str) -> str:
+        """为指定设备安装 Vinted（外置 apks/vinted.apk）。"""
+        # 设备正在执行任务时，拒绝安装以避免和 worker 争用设备。
+        if self._is_worker_running(serial):
+            return f"{serial}: 设备任务运行中，请先停止该设备后再执行一键安装VT"
+        # 解析安装包路径，支持源码和打包运行。
+        try:
+            apk_path = self._resolve_vinted_apk_path()
+        except Exception as exc:
+            log.exception("解析 Vinted 安装包路径失败", serial=serial, error=str(exc))
+            return f"{serial}: 安装失败（找不到 vinted.apk）"
+        # 执行安装命令（-r 覆盖安装，-d 允许降级）。
+        try:
+            result = self._run_adb_for_serial(
+                serial=serial,
+                args=["install", "-r", "-d", str(apk_path)],
+                timeout_sec=200.0,
+            )
+        except Exception as exc:
+            log.exception("安装 Vinted 执行异常", serial=serial, apk_path=str(apk_path), error=str(exc))
+            return f"{serial}: 安装失败（执行异常）{exc}"
+        # 解析命令输出。
+        output_text = self._compact_adb_output(result)
+        output_lower = output_text.lower()
+        # 命中 success 时判定成功。
+        if "success" in output_lower:
+            log.info("Vinted 安装成功", serial=serial, apk_path=str(apk_path), output=output_text)
+            return f"{serial}: Vinted 安装成功"
+        # 非 success 视为失败并返回简化原因。
+        log.error(
+            "Vinted 安装失败",
+            serial=serial,
+            apk_path=str(apk_path),
+            returncode=int(result.returncode),
+            output=output_text,
+        )
+        return f"{serial}: Vinted 安装失败（{output_text or f'returncode={result.returncode}'})"
+
     def uninstall_facebook_all(self) -> list[str]:
         """一键卸载全部在线设备上的 Facebook。"""
         # 读取在线设备列表。
@@ -404,6 +644,26 @@ class DeviceProcessManager:
             return ["未检测到在线设备（adb devices 为空）"]
         # 逐台执行安装并汇总结果。
         return [self.install_facebook_for_device(serial) for serial in serials]
+
+    def uninstall_vinted_all(self) -> list[str]:
+        """一键卸载全部在线设备上的 Vinted。"""
+        # 读取在线设备列表。
+        serials = self.list_online_devices()
+        # 无在线设备时返回友好提示。
+        if not serials:
+            return ["未检测到在线设备（adb devices 为空）"]
+        # 逐台执行卸载并汇总结果。
+        return [self.uninstall_vinted_for_device(serial) for serial in serials]
+
+    def install_vinted_all(self) -> list[str]:
+        """一键安装全部在线设备上的 Vinted。"""
+        # 读取在线设备列表。
+        serials = self.list_online_devices()
+        # 无在线设备时返回友好提示。
+        if not serials:
+            return ["未检测到在线设备（adb devices 为空）"]
+        # 逐台执行安装并汇总结果。
+        return [self.install_vinted_for_device(serial) for serial in serials]
 
     def install_yosemite_for_device(self, serial: str) -> str:
         """为指定设备安装 Yosemite 输入法（手动设为默认）。"""
@@ -535,7 +795,13 @@ class DeviceProcessManager:
         worker: WorkerHandle,
         release_account: bool,
         release_reason: str,
-    ) -> None:
+    ) -> dict[str, object]:
+        # 先清理一次当前设备辅助进程，尽量在删句柄前回收可见残留。
+        helper_cleanup_before = self._cleanup_helper_processes(
+            serial=serial,
+            orphan_only=False,
+            reason=f"{release_reason}_helper_pre_finalize",
+        )
         # 回收句柄资源并从管理表中删除，避免内存和句柄泄漏。
         try:
             worker.command_queue.close()
@@ -547,6 +813,14 @@ class DeviceProcessManager:
         with self._state_lock:
             # 从 worker 管理表移除当前设备句柄。
             self._workers.pop(serial, None)
+        # 句柄删除后再复检一次辅助进程，覆盖已脱离父子关系的孤儿进程。
+        helper_cleanup_after = self._cleanup_helper_processes(
+            serial=serial,
+            orphan_only=False,
+            reason=f"{release_reason}_helper_post_finalize",
+        )
+        # 返回合并后的辅助进程清理结果，供 stop 路径汇总展示。
+        return self._merge_helper_cleanup_results(helper_cleanup_before, helper_cleanup_after)
 
     def _cleanup_dead(self, serial: str) -> None:
         # 清理已经退出的子进程句柄，避免状态污染。
@@ -590,28 +864,48 @@ class DeviceProcessManager:
         # 原因：GUI 需要看到“刚退出”的状态（pid/详情/exit_code），否则会回退成“未启动”误导用户。
         return events
 
-    def start_worker(self, serial: str) -> str:
+    def start_worker(self, serial: str, register_mode: str = "") -> str:
         # 先刷新状态，避免重复启动僵尸条目。
         self.drain_events()
         self._cleanup_dead(serial)
+        # 标准化注册方式参数，避免大小写和空格影响判断。
+        normalized_register_mode = _normalize_register_mode(register_mode)
+        # 注册方式非法时直接返回明确错误，避免启动出错后才暴露问题。
+        if normalized_register_mode not in VALID_REGISTER_MODES:
+            # 记录非法启动请求，便于排查 GUI/CLI 调用链问题。
+            log.warning("启动 worker 失败：注册方式非法", serial=serial, register_mode=register_mode)
+            # 返回可直接展示给界面的错误文案。
+            return f"{serial}: 启动失败，请先选择注册方式"
 
         old = self._get_worker(serial)
         if old and old.process.is_alive():
+            # 已有运行中 worker 时仅读取当前辅助进程快照，帮助排查状态混乱。
+            helper_snapshot = self._collect_helper_processes(serial=serial, orphan_only=False)
             log.warning("设备已在运行", serial=serial, pid=old.process.pid)
+            # 命中辅助进程快照时补一条诊断日志，便于排查多进程错乱。
+            if helper_snapshot:
+                log.warning(
+                    "设备已在运行，当前辅助进程快照",
+                    serial=serial,
+                    pid=old.process.pid,
+                    helper_processes=self._format_helper_processes_for_log(helper_snapshot),
+                )
             return f"{serial}: 已在运行 pid={old.process.pid}"
 
+        # 新 worker 拉起前先清理当前设备历史残留辅助进程，避免新旧运行时串线。
+        self._cleanup_helper_processes(serial=serial, orphan_only=False, reason="start_worker_preflight_cleanup")
         # 为新子进程创建 stop 事件和命令队列。
         stop_event = self._ctx.Event()
         command_queue: mp.Queue = self._ctx.Queue()
         # 创建并启动子进程。
         process = self._ctx.Process(
             target=worker_main,
-            args=(serial, self._loop_interval_sec, stop_event, command_queue, self._event_queue),
+            args=(serial, normalized_register_mode, self._loop_interval_sec, stop_event, command_queue, self._event_queue),
             name=f"autovt-{serial}",
             daemon=False,
         )
         process.start()
-        log.info("子进程已启动", serial=serial, pid=process.pid)
+        log.info("子进程已启动", serial=serial, pid=process.pid, register_mode=normalized_register_mode)
 
         # 保存句柄，供后续 stop/restart/status 使用。
         # 使用状态锁保护 worker 句柄写入，避免后台动作与状态刷新并发冲突。
@@ -648,12 +942,13 @@ class DeviceProcessManager:
             return f"{serial}: 启动失败，{detail}"
         return f"{serial}: 启动成功 pid={process.pid}"
 
-    def start_all(self) -> list[str]:
+    def start_all(self, register_mode: str = "") -> list[str]:
         # 启动所有在线设备对应的子进程。
         serials = self.list_online_devices()
         if not serials:
             return ["未检测到在线设备（adb devices 为空）"]
-        return [self.start_worker(serial) for serial in serials]
+        # 批量启动时统一把注册方式透传给每一台设备。
+        return [self.start_worker(serial, register_mode=register_mode) for serial in serials]
 
     def _try_realtime_pause_resume(self, serial: str, worker: WorkerHandle, command: str) -> str | None:
         # 尝试使用进程级 suspend/resume 实现“尽量即时”的暂停与恢复。
@@ -790,6 +1085,8 @@ class DeviceProcessManager:
                 continue
         # 记录本次进程树清理结果日志。
         log.info("worker 子进程树清理完成", serial=serial, pid=pid, reason=reason, child_count=len(children), alive_after_terminate=len(alive_children))
+        # 进程树清理后再做一次签名级复检，覆盖已脱离父子关系的孤儿辅助进程。
+        self._cleanup_helper_processes(serial=serial, orphan_only=False, reason=f"{reason}_signature_cleanup")
 
     def stop_worker(self, serial: str, timeout_sec: float | None = None) -> str:
         # 停止指定设备子进程：先优雅停止，超时再强杀。
@@ -841,12 +1138,18 @@ class DeviceProcessManager:
             log.info("子进程已停止", serial=serial)
 
         # 回收资源并删除句柄。
-        self._finalize_worker_stop(
+        helper_cleanup = self._finalize_worker_stop(
             serial=serial,
             worker=worker,
             release_account=True,
             release_reason="stop_worker",
         )
+        # 还有残留时返回明确提示，避免界面误以为完全收口。
+        if list(helper_cleanup.get("remaining", []) or []):
+            msg = f"{serial}: 已停止，但仍检测到残留辅助进程"
+        # 命中过残留但已清理干净时，明确告知已做额外收口。
+        elif int(helper_cleanup.get("matched", 0) or 0) > 0 and msg.endswith("已停止"):
+            msg = f"{serial}: 已停止并清理残留"
         return msg
 
     def stop_all(self, timeout_sec: float | None = None) -> list[str]:
@@ -966,18 +1269,24 @@ class DeviceProcessManager:
                 msg = f"{serial}: 已停止"
                 log.info("stop_all 子进程已停止", serial=serial)
 
-            self._finalize_worker_stop(
+            helper_cleanup = self._finalize_worker_stop(
                 serial=serial,
                 worker=worker,
                 release_account=True,
                 release_reason="stop_all",
             )
+            # 还有残留时把结果升级为明确异常提示。
+            if list(helper_cleanup.get("remaining", []) or []):
+                msg = f"{serial}: 已停止，但仍检测到残留辅助进程"
+            # 命中过残留且已清理干净时，给界面返回更准确文案。
+            elif int(helper_cleanup.get("matched", 0) or 0) > 0 and msg.endswith("已停止"):
+                msg = f"{serial}: 已停止并清理残留"
             messages.append(msg)
         return messages
 
-    def restart_worker(self, serial: str, timeout_sec: float | None = None) -> list[str]:
+    def restart_worker(self, serial: str, timeout_sec: float | None = None, register_mode: str = "") -> list[str]:
         # 重启：先停再启，返回两条结果信息。
-        return [self.stop_worker(serial, timeout_sec=timeout_sec), self.start_worker(serial)]
+        return [self.stop_worker(serial, timeout_sec=timeout_sec), self.start_worker(serial, register_mode=register_mode)]
 
     def status(self) -> list[dict[str, str | int | float]]:
         # 返回当前所有子进程状态快照，供 CLI/GUI 展示。

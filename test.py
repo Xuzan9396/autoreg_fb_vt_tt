@@ -28,8 +28,10 @@ from autovt.runtime import get_poco
 from autovt.runtime import setup_device
 # 导入任务上下文对象，保持与 worker 调用一致。
 from autovt.tasks.task_context import TaskContext
-# 导入你要调试的方法所在任务类。
+# 导入 OpenSettings 调试任务类。
 from autovt.tasks.open_settings import OpenSettingsTask
+# 导入 Vinted 调试任务类。
+from autovt.tasks.vinted import VintedTask
 
 # 记录本进程是否创建过 Poco，避免无意义清理报错。
 _POCO_CREATED = False
@@ -236,9 +238,15 @@ def run_target_method(task: OpenSettingsTask, method_name: str) -> None:
         task.nekobox_run_all()
         # 当前分支结束后返回。
         return
+    # 只跑 Vinted 滑块方法。
+    if method_name == "vinted_slider":
+        # 执行 Vinted 独立滑块方法。
+        task.vinted_slider()
+        # 当前分支结束后返回。
+        return
     raise RuntimeError(
         "不支持的方法: "
-        f"{method_name}，可用方法: run_once/all, clear_all, mojiwang_run_all, facebook_run_all, mojiwang_run_one_loop, nekobox_run_all"
+        f"{method_name}，可用方法: run_once/all, clear_all, mojiwang_run_all, facebook_run_all, mojiwang_run_one_loop, nekobox_run_all, vinted_slider"
     # 抛出可用方法列表，便于快速修正命令。
     )
 
@@ -350,8 +358,16 @@ def main() -> None:
 
         "client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
         "pwd": "Xz272511272511"}
-    # 创建任务实例（统一通过上下文对象传参）。
-    task = OpenSettingsTask(task_context=task_context)
+    # 先判断当前调试方法是否需要使用 Vinted 任务类。
+    use_vinted_task = method_name == "vinted_slider"
+    # Vinted 滑块调试时实例化 VintedTask。
+    if use_vinted_task:
+        # 创建 Vinted 调试任务实例。
+        task = VintedTask(task_context=task_context)
+    # 其他方法继续使用 OpenSettingsTask。
+    else:
+        # 创建 OpenSettings 调试任务实例。
+        task = OpenSettingsTask(task_context=task_context)
     # 打印本次调试入口信息，确认设备和语言上下文。
     safe_print(
         "开始调试方法:",

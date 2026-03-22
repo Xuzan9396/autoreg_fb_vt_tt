@@ -68,6 +68,10 @@ class DeviceTab:
         self.log_list_column: ft.Column | None = None
         # 日志区元信息文本（条数 + 最近刷新时间）。
         self.log_meta_text: ft.Text | None = None
+        # 注册方式下拉框控件引用，供后续启动动作读取当前选择。
+        self.register_mode_dropdown: ft.Dropdown | None = None
+        # 缓存当前注册方式选择值，默认空字符串表示“未选择”。
+        self.selected_register_mode = ""
 
     def build(self) -> ft.Control:
         """构建设备列表 Tab 的内容。"""
@@ -113,6 +117,24 @@ class DeviceTab:
             # 黑底场景下使用半透明白字。
             color=ft.Colors.WHITE70,
         )
+        # 创建设备页顶部“注册方式”下拉框，默认保持空值等待用户显式选择。
+        self.register_mode_dropdown = ft.Dropdown(
+            # 使用标签明确说明该控件用途。
+            label="注册方式",
+            # 默认空字符串，对应“选择注册方式”。
+            value="",
+            # 控件宽度固定，避免随窗口伸缩影响按钮布局。
+            width=180,
+            # 下拉选项固定为“空 / Facebook / Vinted”三种。
+            options=[
+                # 空值选项作为默认占位提示。
+                ft.dropdown.Option("", "选择注册方式"),
+                # Facebook 注册模式选项。
+                ft.dropdown.Option("facebook", "facebook注册"),
+                # Vinted 注册模式选项。
+                ft.dropdown.Option("vinted", "vinted注册"),
+            ],
+        )
         try:
             # 构建设备页时异步加载一次日志，避免首次进入同步扫盘卡住界面。
             self.page.run_task(self._refresh_logs_view_async, True)
@@ -125,8 +147,10 @@ class DeviceTab:
             controls=[
                 # 刷新设备按钮（按内容宽度显示）。
                 ft.FilledButton("刷新设备", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
+                # 注册方式下拉框放在“启动全部”前面，供用户先选择当前批次模式。
+                self.register_mode_dropdown,
                 # 启动全部按钮（按内容宽度显示）。
-                ft.FilledButton("启动全部", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self._run_action("启动全部", self.manager.start_all)),
+                ft.FilledButton("启动全部", icon=ft.Icons.PLAY_ARROW, on_click=lambda e: self._handle_start_all()),
                 # 停止全部按钮（按内容宽度显示）。
                 ft.FilledButton("停止全部", icon=ft.Icons.STOP, on_click=lambda e: self._run_action("停止全部", self.manager.stop_all)),
                 # 暂停全部按钮（按内容宽度显示）。
@@ -144,6 +168,18 @@ class DeviceTab:
                     "一键安装FB",
                     icon=ft.Icons.DOWNLOAD,
                     on_click=lambda e: self._run_action("一键安装FB", self.manager.install_facebook_all),
+                ),
+                # 新增“一键卸载 Vinted”按钮，作用于全部在线设备。
+                ft.FilledButton(
+                    "一键删除VT",
+                    icon=ft.Icons.DELETE,
+                    on_click=lambda e: self._run_action("一键删除VT", self.manager.uninstall_vinted_all),
+                ),
+                # 新增“一键安装 Vinted”按钮，使用 apks/vinted.apk 安装到全部在线设备。
+                ft.FilledButton(
+                    "一键安装VT",
+                    icon=ft.Icons.DOWNLOAD,
+                    on_click=lambda e: self._run_action("一键安装VT", self.manager.install_vinted_all),
                 ),
                 # 新增“一键安装输入法”按钮，安装 Yosemite.apk（手动设默认）。
                 ft.FilledButton(
@@ -285,6 +321,62 @@ class DeviceTab:
         )
         # 用 expand 容器包裹根列，确保高度约束生效。
         return ft.Container(expand=True, content=body)
+
+    def _get_selected_register_mode(self) -> str:
+        """读取当前注册方式选择值，统一兼容控件值与本地缓存值。"""
+        # 下拉框已创建时优先读取控件最新值。
+        if self.register_mode_dropdown is not None:
+            # 把当前控件值标准化为字符串，避免 None 干扰判断。
+            current_value = str(self.register_mode_dropdown.value or "").strip()
+            # 同步刷新缓存值，保证单设备和批量按钮读取一致。
+            self.selected_register_mode = current_value
+        # 返回当前缓存的注册方式值。
+        return str(self.selected_register_mode or "").strip()
+
+    def _require_register_mode(self) -> str | None:
+        """启动前校验注册方式，未选择时弹提示并中断。"""
+        # 读取当前用户选择的注册方式。
+        register_mode = self._get_selected_register_mode()
+        # 仅允许 facebook 和 vinted 两种合法值。
+        if register_mode not in {"facebook", "vinted"}:
+            # 界面提示用户必须先选择注册方式。
+            self._show_snack("选择注册方式")
+            # 记录当前非法启动尝试，便于排查操作路径。
+            log.warning("启动任务前未选择合法注册方式", register_mode=register_mode)
+            # 返回空值表示本次不允许继续启动。
+            return None
+        # 返回合法注册方式。
+        return register_mode
+
+    def _handle_start_all(self) -> None:
+        """处理“启动全部”点击事件。"""
+        # 先校验注册方式，再决定是否发起后台动作。
+        register_mode = self._require_register_mode()
+        # 未通过校验时直接中断。
+        if register_mode is None:
+            return
+        # 把当前注册方式透传给 manager，供后续 worker 分流。
+        self._run_action("启动全部", lambda: self.manager.start_all(register_mode=register_mode))
+
+    def _handle_start_device(self, serial: str) -> None:
+        """处理单设备启动动作，保持与批量启动相同的模式校验。"""
+        # 先校验注册方式。
+        register_mode = self._require_register_mode()
+        # 未通过校验时不触发启动。
+        if register_mode is None:
+            return
+        # 发起单设备启动动作，并把模式值一起传递。
+        self._run_action(f"{serial} 启动", lambda: self.manager.start_worker(serial, register_mode=register_mode))
+
+    def _handle_restart_device(self, serial: str) -> None:
+        """处理单设备重启动作，避免重启时丢失注册方式。"""
+        # 先校验注册方式。
+        register_mode = self._require_register_mode()
+        # 未通过校验时不触发重启。
+        if register_mode is None:
+            return
+        # 发起单设备重启动作，并透传当前模式。
+        self._run_action(f"{serial} 重启", lambda: self.manager.restart_worker(serial, register_mode=register_mode))
 
     def refresh(self, source: str, show_toast: bool) -> None:
         """刷新设备列表和进程状态。"""
@@ -499,7 +591,7 @@ class DeviceTab:
         action_row = ft.Row(
             controls=[
                 # 启动按钮（按内容宽度显示）。
-                ft.OutlinedButton("启动", icon=ft.Icons.PLAY_ARROW, on_click=lambda e, s=item.serial: self._run_action(f"{s} 启动", lambda: self.manager.start_worker(s))),
+                ft.OutlinedButton("启动", icon=ft.Icons.PLAY_ARROW, on_click=lambda e, s=item.serial: self._handle_start_device(s)),
                 # 停止按钮（按内容宽度显示）。
                 ft.OutlinedButton("停止", icon=ft.Icons.STOP, on_click=lambda e, s=item.serial: self._run_action(f"{s} 停止", lambda: self.manager.stop_worker(s))),
                 # 暂停按钮（按内容宽度显示）。
@@ -507,7 +599,7 @@ class DeviceTab:
                 # 恢复按钮（按内容宽度显示）。
                 ft.OutlinedButton("恢复", icon=ft.Icons.PLAY_CIRCLE_FILL, on_click=lambda e, s=item.serial: self._run_action(f"{s} 恢复", lambda: self.manager.send_command(s, "resume"))),
                 # 重启按钮（按内容宽度显示）。
-                ft.OutlinedButton("重启", icon=ft.Icons.RESTART_ALT, on_click=lambda e, s=item.serial: self._run_action(f"{s} 重启", lambda: self.manager.restart_worker(s))),
+                ft.OutlinedButton("重启", icon=ft.Icons.RESTART_ALT, on_click=lambda e, s=item.serial: self._handle_restart_device(s)),
                 # 单设备删除 Facebook 按钮。
                 ft.OutlinedButton(
                     "删除FB",
@@ -519,6 +611,18 @@ class DeviceTab:
                     "安装FB",
                     icon=ft.Icons.DOWNLOAD,
                     on_click=lambda e, s=item.serial: self._run_action(f"{s} 安装FB", lambda: self.manager.install_facebook_for_device(s)),
+                ),
+                # 单设备删除 Vinted 按钮。
+                ft.OutlinedButton(
+                    "删除VT",
+                    icon=ft.Icons.DELETE,
+                    on_click=lambda e, s=item.serial: self._run_action(f"{s} 删除VT", lambda: self.manager.uninstall_vinted_for_device(s)),
+                ),
+                # 单设备安装 Vinted 按钮。
+                ft.OutlinedButton(
+                    "安装VT",
+                    icon=ft.Icons.DOWNLOAD,
+                    on_click=lambda e, s=item.serial: self._run_action(f"{s} 安装VT", lambda: self.manager.install_vinted_for_device(s)),
                 ),
                 # 单设备安装 Yosemite 输入法按钮（安装后手动设默认）。
                 ft.OutlinedButton(

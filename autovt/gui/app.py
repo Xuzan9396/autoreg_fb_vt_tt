@@ -8,6 +8,7 @@ import os
 import platform
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -36,6 +37,8 @@ class AutoVTGuiApp:
         self._monitor_running = True
         self._closing = False
         self._action_running = False
+        self._shutdown_done = False
+        self._shutdown_lock = threading.RLock()
 
         # ── 后端服务 ──
         self.manager = DeviceProcessManager(loop_interval_sec=loop_interval_sec)
@@ -437,6 +440,16 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
 
     def _shutdown(self) -> None:
+        # 使用幂等锁保护停机核心逻辑，避免窗口关闭、信号和 atexit 重复执行。
+        with self._shutdown_lock:
+            # 已执行过停机时直接返回，避免重复 stop_all 和重复 close。
+            if self._shutdown_done:
+                # 记录幂等命中日志，便于排查多入口同时关闭。
+                log.debug("GUI 停机逻辑重复触发，已跳过")
+                # 结束本次停机调用。
+                return
+            # 标记停机逻辑已经执行，后续入口不再重复收口。
+            self._shutdown_done = True
         # 停掉后台监控循环，避免退出期间继续触发自动刷新。
         self._monitor_running = False
         try:
@@ -496,22 +509,24 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
 
     # 缓存当前 GUI 应用实例，供 Ctrl+C 信号处理时复用停机逻辑。
     app_holder: dict[str, AutoVTGuiApp | None] = {"app": None}
-    # 记录是否已处理过 Ctrl+C，避免重复执行停机。
-    sigint_handled = False
-    # 保存旧的 SIGINT 处理器，退出时恢复。
-    old_sigint_handler = signal.getsignal(signal.SIGINT)
+    # 记录是否已处理过退出信号，避免重复执行停机。
+    exit_signal_handled = False
+    # 记录本次注册过的旧信号处理器，便于退出时恢复。
+    old_signal_handlers: dict[int, object] = {}
 
-    # 定义 Ctrl+C 信号处理方法。
-    def _handle_sigint(_signum: int, _frame: object | None) -> None:
+    # 定义统一退出信号处理方法。
+    def _handle_exit_signal(signum: int, _frame: object | None) -> None:
         # 声明要修改外层标记变量。
-        nonlocal sigint_handled
+        nonlocal exit_signal_handled
         # 已处理过时直接返回，防止重复 stop_all。
-        if sigint_handled:
+        if exit_signal_handled:
             return
         # 标记已处理，后续信号不再重复执行。
-        sigint_handled = True
-        # 记录中断日志，便于排查停机链路。
-        log.warning("GUI 收到 Ctrl+C，准备停止全部并退出")
+        exit_signal_handled = True
+        # 读取当前信号名，便于日志区分 Ctrl+C 和终端结束等场景。
+        signal_name = getattr(signal.Signals(signum), "name", str(signum))
+        # 记录信号停机日志，便于排查源码模式终端结束链路。
+        log.warning("GUI 收到退出信号，准备停止全部并退出", signal_name=signal_name, signum=signum)
         # 读取当前 GUI 应用实例。
         app = app_holder.get("app")
         # 存在应用实例时先执行优雅停机。
@@ -523,12 +538,19 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
             # 停机失败时记录日志，但仍继续退出进程。
             except Exception:
                 # 打印完整异常栈，满足错误可追踪。
-                log.exception("Ctrl+C 停机清理失败")
+                log.exception("退出信号停机清理失败", signal_name=signal_name, signum=signum)
         # 以中断退出码强制结束进程，避免 Flet 事件循环继续阻塞。
-        raise SystemExit(130)
+        raise SystemExit(128 + int(signum))
 
-    # 把 Ctrl+C 绑定到当前自定义处理器。
-    signal.signal(signal.SIGINT, _handle_sigint)
+    # 统一注册源码模式常见退出信号，保证 Ctrl+C、kill、终端结束都走同一停机链路。
+    for current_signal in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        # 跳过当前平台不存在的信号常量。
+        if current_signal is None:
+            continue
+        # 保存旧处理器，便于 finally 恢复。
+        old_signal_handlers[int(current_signal)] = signal.getsignal(current_signal)
+        # 把当前信号绑定到统一退出处理器。
+        signal.signal(current_signal, _handle_exit_signal)
 
     # 定义 Flet 入口回调。
     def _main(page: ft.Page) -> None:
@@ -576,8 +598,10 @@ def run_gui(loop_interval_sec: float = WORKER_LOOP_INTERVAL_SEC) -> None:
         raise
     # 退出时恢复原始 SIGINT 处理器。
     finally:
-        # 恢复调用 run_gui 之前的 SIGINT 行为。
-        signal.signal(signal.SIGINT, old_sigint_handler)
+        # 逐个恢复调用 run_gui 前的原始信号处理器。
+        for signum, old_handler in old_signal_handlers.items():
+            # 尝试恢复当前信号的旧处理器。
+            signal.signal(signum, old_handler)
 
 
 def main() -> None:

@@ -6,30 +6,30 @@ import sys
 
 # 先尝试正常包导入（推荐运行方式）。
 try:
-    # 导入 Facebook 验证码主入口方法。
-    from autovt.emails import getfackbook_code
+    # 导入 Vinted 验证码主入口方法。
+    from autovt.emails import getvinted_code
 # 直跑文件时包路径可能不可见，这里做一次路径兜底。
 except ModuleNotFoundError:
-    # 计算项目根目录路径（当前文件在 autovt/emails/test.py，下两级是项目根）。
+    # 计算项目根目录路径（当前文件在 autovt/emails/test_vt.py，下两级是项目根）。
     project_root = Path(__file__).resolve().parents[2]
     # 把项目根目录插入 sys.path 首位，保证 `import autovt` 可用。
     sys.path.insert(0, str(project_root))
     # 补路径后再次导入目标方法。
-    from autovt.emails import getfackbook_code
+    from autovt.emails import getvinted_code
 
-# uv run python -m autovt.emails.test
-# uv run python autovt/emails/test.py
+# uv run python -m autovt.emails.test_vt
+# uv run python autovt/emails/test_vt.py
 
-# 定义主函数，便于 `python -m autovt.emails.test` 与直跑两种方式复用。
+# 定义主函数，便于 `python -m autovt.emails.test_vt` 与直跑两种方式复用。
 def main() -> None:
     # 调用验证码获取入口并接收结果。
-    ok, result = getfackbook_code(
+    ok, result = getvinted_code(
         # 传入微软 OAuth client_id。
         client_id="9e5f94bc-e8a4-4e73-b8be-63364c29d753",
         # 传入目标邮箱账号。
-        email_name="AleneHammeszdf@outlook.com",
+        email_name="StaceyGreenfeldersntgu@outlook.com",
         # 传入 refresh_token 用于刷新 access_token。
-        refresh_token="M.C527_SN1.0.U.-Cm5SH06ikT6uepAR3*9BZa7volpmQCYUcsAe8ct0MN9Yrq*uUBbRi5PJ5QF!4nTufdLQELLqttOPkuC!TlMAcq8em1c!BE0j!Mr2epGaQShZFKsyw*e4reLA0ZgN4m4!oGAfjN!60E4sTp5UJ3au4p6oqhIKicku30OUlSroATjJ87nUFkm8YPGjTJRSLAyNvX2EZ0ea5Y95ut9u8W!A1vxH9vxEiURBaLZw7W6qsN2vZMjdH1EiqIsarc8y!tijJj7HK89CLXPNQpdw2tkFfq5IbBBJUX4ksNMT6Prs*w6qg!D25fgGRZz4oeCxRPxptvxCpRaxQcmDC11D8U2bSfo7qCCRX2Qzf8rBjMCpqeuRITXeZiPhBC3mX2FiKhpGfa7gAY!wjq9OoJ9BVdXJ7om4wA7eiUZtSNLynDb8eEteGHzEdu2!ts6w7oIQQ0Dipw$$",
+        refresh_token="M.C513_SN1.0.U.-CgrokmZGmk*eRyA34uTGVZlHbzdhNRnKZiRmuH9F*13UgF3iy*5iD2!p5sNdfWAdTT0ESa!362nWvqS33PoX2Lfxw6O7Bm4DfED2VmMIki9K2GPNTK3HZGOF2hlDddlX69OhlUPIq3sLhc6ktexoIA5VDf1vTzN688HHSeYsvtI6OpS*3uGSxowEG0CDYFOXxZL89s!c3!Ha*K2INzpe4XDbpos8SxIXJOxoE52ojReTaeImq4TrSG7gbNQz!981GIEa9B*7twnNdyBJhXtzIfIRTDq8uJb6g4umxBFGAW2QsfDKxX6CFgsgIT4FuLX9hryjPZkeVX3*y8vGikQAQSiNc8J4OB*pM227ZNhChNWMWLMYeOD82zkipLMg3d11uCEdcJYNhdTyuhFVkxFIjQPREorUv5U6e4TKDwK4MX7ofyV!ZT6pAem0oKpgY*Nqwg$$",
         # 关闭调试落盘（需要调试时改为 True）。
         is_debug=False,
     )

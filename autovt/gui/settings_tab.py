@@ -23,6 +23,8 @@ from autovt.gui.helpers import (
     SETTING_FB_DEL_NUM_KEY,
     STATUS_23_RETRY_MAX_DESC,
     STATUS_23_RETRY_MAX_KEY,
+    VT_DELETE_NUM_DESC,
+    VT_DELETE_NUM_KEY,
     VT_PWD_DESC,
     VT_PWD_KEY,
     format_timestamp,
@@ -50,6 +52,7 @@ class SettingsTab:
         self.status_23_retry_value_input: ft.TextField | None = None
         self.vt_pwd_value_input: ft.TextField | None = None
         self.fb_delete_num_value_input: ft.TextField | None = None
+        self.vt_delete_num_value_input: ft.TextField | None = None
         self.setting_fb_del_num_value_input: ft.TextField | None = None
         self.proxyip_start_num_value_input: ft.TextField | None = None
         self.proxyip_end_num_value_input: ft.TextField | None = None
@@ -57,6 +60,7 @@ class SettingsTab:
         self.status_23_retry_desc_text: ft.Text | None = None
         self.vt_pwd_desc_text: ft.Text | None = None
         self.fb_delete_num_desc_text: ft.Text | None = None
+        self.vt_delete_num_desc_text: ft.Text | None = None
         self.setting_fb_del_num_desc_text: ft.Text | None = None
         self.proxyip_start_num_desc_text: ft.Text | None = None
         self.proxyip_end_num_desc_text: ft.Text | None = None
@@ -98,13 +102,28 @@ class SettingsTab:
             # 设置输入框标签为配置 key。
             label=FB_DELETE_NUM_KEY,
             # 设置输入提示文案。
-            hint_text="请输入大于等于 0 的整数（0 不删除，其他数字每隔第几次重装）",
+            hint_text="请输入大于等于 0 的整数（1 每次都重装，2 从第2次开始每次都重装）",
             # 统一输入框宽度。
             width=420,
             # 使用数字键盘输入。
             keyboard_type=ft.KeyboardType.NUMBER,
             # 输入变化时做软校验。
             on_change=self._sanitize_fb_delete_num_input,
+            # 回车时触发保存。
+            on_submit=self.save_config,
+        )
+        # 创建 Vinted 删除控制输入框。
+        self.vt_delete_num_value_input = ft.TextField(
+            # 设置输入框标签为配置 key。
+            label=VT_DELETE_NUM_KEY,
+            # 设置输入提示文案。
+            hint_text="请输入大于等于 0 的整数（1 每次都重装，2 从第2次开始每次都重装）",
+            # 统一输入框宽度。
+            width=420,
+            # 使用数字键盘输入。
+            keyboard_type=ft.KeyboardType.NUMBER,
+            # 输入变化时做软校验。
+            on_change=self._sanitize_vt_delete_num_input,
             # 回车时触发保存。
             on_submit=self.save_config,
         )
@@ -159,6 +178,8 @@ class SettingsTab:
         self.vt_pwd_desc_text = ft.Text(value=VT_PWD_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
         # 创建 Facebook 删除控制描述文本。
         self.fb_delete_num_desc_text = ft.Text(value=FB_DELETE_NUM_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
+        # 创建 Vinted 删除控制描述文本。
+        self.vt_delete_num_desc_text = ft.Text(value=VT_DELETE_NUM_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
         # 创建设置页 Facebook 账号清理控制描述文本。
         self.setting_fb_del_num_desc_text = ft.Text(value=SETTING_FB_DEL_NUM_DESC, size=13, color=ft.Colors.BLUE_GREY_700)
         # 创建代理开始位置描述文本。
@@ -179,8 +200,12 @@ class SettingsTab:
                     self._build_setting_item(self.fb_delete_num_desc_text, self.fb_delete_num_value_input),
                 ),
                 self._build_setting_row(
+                    self._build_setting_item(self.vt_delete_num_desc_text, self.vt_delete_num_value_input),
                     self._build_setting_item(self.setting_fb_del_num_desc_text, self.setting_fb_del_num_value_input),
+                ),
+                self._build_setting_row(
                     self._build_proxy_range_item(),
+                    None,
                 ),
             ],
             spacing=12,
@@ -369,6 +394,11 @@ class SettingsTab:
         # 复用通用非负整数输入清洗逻辑。
         self._sanitize_non_negative_int_input(self.fb_delete_num_value_input, "fb_delete_num")
 
+    def _sanitize_vt_delete_num_input(self, _e: ft.ControlEvent | None = None) -> None:
+        """软校验 vt_delete_num 输入：允许清空，限制为非负整数。"""
+        # 复用通用非负整数输入清洗逻辑。
+        self._sanitize_non_negative_int_input(self.vt_delete_num_value_input, "vt_delete_num")
+
     def _sanitize_setting_fb_del_num_input(self, _e: ft.ControlEvent | None = None) -> None:
         """软校验 setting_fb_del_num 输入：允许清空，限制为非负整数。"""
         # 复用通用非负整数输入清洗逻辑。
@@ -482,6 +512,7 @@ class SettingsTab:
             or not self.status_23_retry_value_input
             or not self.vt_pwd_value_input
             or not self.fb_delete_num_value_input
+            or not self.vt_delete_num_value_input
             or not self.setting_fb_del_num_value_input
             or not self.proxyip_start_num_value_input
             or not self.proxyip_end_num_value_input
@@ -489,6 +520,7 @@ class SettingsTab:
             or not self.status_23_retry_desc_text
             or not self.vt_pwd_desc_text
             or not self.fb_delete_num_desc_text
+            or not self.vt_delete_num_desc_text
             or not self.setting_fb_del_num_desc_text
             or not self.proxyip_start_num_desc_text
             or not self.proxyip_end_num_desc_text
@@ -524,6 +556,8 @@ class SettingsTab:
             self.vt_pwd_value_input.value = str(snapshot["vt_pwd_val"])
             # 回填 Facebook 删除控制值。
             self.fb_delete_num_value_input.value = str(snapshot["fb_delete_num_val"])
+            # 回填 Vinted 删除控制值。
+            self.vt_delete_num_value_input.value = str(snapshot["vt_delete_num_val"])
             # 回填设置页 Facebook 账号清理控制值。
             self.setting_fb_del_num_value_input.value = str(snapshot["setting_fb_del_num_val"])
             # 回填代理开始位置配置值。
@@ -538,6 +572,8 @@ class SettingsTab:
             self.vt_pwd_desc_text.value = str(snapshot["vt_pwd_desc"])
             # 回填 Facebook 删除控制配置描述文案。
             self.fb_delete_num_desc_text.value = str(snapshot["fb_delete_num_desc"])
+            # 回填 Vinted 删除控制配置描述文案。
+            self.vt_delete_num_desc_text.value = str(snapshot["vt_delete_num_desc"])
             # 回填设置页 Facebook 账号清理控制配置描述文案。
             self.setting_fb_del_num_desc_text.value = str(snapshot["setting_fb_del_num_desc"])
             # 回填代理开始位置配置描述文案。
@@ -597,6 +633,8 @@ class SettingsTab:
             vt_pwd_row = reader.get_config(VT_PWD_KEY)
             # 读取 Facebook 删除控制配置。
             fb_delete_num_row = reader.get_config(FB_DELETE_NUM_KEY)
+            # 读取 Vinted 删除控制配置。
+            vt_delete_num_row = reader.get_config(VT_DELETE_NUM_KEY)
             # 读取设置页 Facebook 账号清理控制配置。
             setting_fb_del_num_row = reader.get_config(SETTING_FB_DEL_NUM_KEY)
             # 读取代理开始位置配置。
@@ -615,6 +653,9 @@ class SettingsTab:
             # Facebook 删除控制配置不存在时抛错。
             if fb_delete_num_row is None:
                 raise RuntimeError(f"读取配置失败：{FB_DELETE_NUM_KEY} 不存在")
+            # Vinted 删除控制配置不存在时抛错。
+            if vt_delete_num_row is None:
+                raise RuntimeError(f"读取配置失败：{VT_DELETE_NUM_KEY} 不存在")
             # 设置页 Facebook 账号清理控制配置不存在时抛错。
             if setting_fb_del_num_row is None:
                 raise RuntimeError(f"读取配置失败：{SETTING_FB_DEL_NUM_KEY} 不存在")
@@ -631,6 +672,7 @@ class SettingsTab:
                 int(retry_row.get("update_at", 0)),
                 int(vt_pwd_row.get("update_at", 0)),
                 int(fb_delete_num_row.get("update_at", 0)),
+                int(vt_delete_num_row.get("update_at", 0)),
                 int(setting_fb_del_num_row.get("update_at", 0)),
                 int(proxyip_start_num_row.get("update_at", 0)),
                 int(proxyip_end_num_row.get("update_at", 0)),
@@ -641,6 +683,7 @@ class SettingsTab:
                 "retry_val": str(retry_row.get("val", "0")),
                 "vt_pwd_val": str(vt_pwd_row.get("val", "")),
                 "fb_delete_num_val": str(fb_delete_num_row.get("val", "0")),
+                "vt_delete_num_val": str(vt_delete_num_row.get("val", "0")),
                 "setting_fb_del_num_val": str(setting_fb_del_num_row.get("val", "0")),
                 "proxyip_start_num_val": str(proxyip_start_num_row.get("val", "1")),
                 "proxyip_end_num_val": str(proxyip_end_num_row.get("val", "1")),
@@ -648,6 +691,7 @@ class SettingsTab:
                 "retry_desc": str(retry_row.get("desc", STATUS_23_RETRY_MAX_DESC)),
                 "vt_pwd_desc": str(vt_pwd_row.get("desc", VT_PWD_DESC)),
                 "fb_delete_num_desc": FB_DELETE_NUM_DESC,
+                "vt_delete_num_desc": VT_DELETE_NUM_DESC,
                 "setting_fb_del_num_desc": SETTING_FB_DEL_NUM_DESC,
                 "proxyip_start_num_desc": PROXYIP_START_NUM_DESC,
                 "proxyip_end_num_desc": PROXYIP_END_NUM_DESC,
@@ -669,6 +713,7 @@ class SettingsTab:
             or not self.status_23_retry_value_input
             or not self.vt_pwd_value_input
             or not self.fb_delete_num_value_input
+            or not self.vt_delete_num_value_input
             or not self.setting_fb_del_num_value_input
             or not self.proxyip_start_num_value_input
             or not self.proxyip_end_num_value_input
@@ -682,6 +727,8 @@ class SettingsTab:
         vt_pwd_raw_value = str(self.vt_pwd_value_input.value or "")
         # 读取 Facebook 删除控制输入值。
         fb_delete_num_raw_value = str(self.fb_delete_num_value_input.value or "").strip()
+        # 读取 Vinted 删除控制输入值。
+        vt_delete_num_raw_value = str(self.vt_delete_num_value_input.value or "").strip()
         # 读取设置页 Facebook 账号清理控制输入值。
         setting_fb_del_num_raw_value = str(self.setting_fb_del_num_value_input.value or "").strip()
         # 读取代理开始位置输入值。
@@ -696,6 +743,9 @@ class SettingsTab:
             return
         if fb_delete_num_raw_value == "":
             self._show_snack("fb_delete_num 不能为空，请输入大于等于 0 的整数。")
+            return
+        if vt_delete_num_raw_value == "":
+            self._show_snack("vt_delete_num 不能为空，请输入大于等于 0 的整数。")
             return
         if setting_fb_del_num_raw_value == "":
             self._show_snack("setting_fb_del_num 不能为空，请输入大于等于 0 的整数。")
@@ -731,6 +781,8 @@ class SettingsTab:
             self.user_db.set_config(key=VT_PWD_KEY, val=vt_pwd_raw_value, desc=VT_PWD_DESC)
             # 保存 Facebook 删除控制配置。
             self.user_db.set_config(key=FB_DELETE_NUM_KEY, val=fb_delete_num_raw_value, desc=FB_DELETE_NUM_DESC)
+            # 保存 Vinted 删除控制配置。
+            self.user_db.set_config(key=VT_DELETE_NUM_KEY, val=vt_delete_num_raw_value, desc=VT_DELETE_NUM_DESC)
             # 保存设置页 Facebook 账号清理控制配置。
             self.user_db.set_config(key=SETTING_FB_DEL_NUM_KEY, val=setting_fb_del_num_raw_value, desc=SETTING_FB_DEL_NUM_DESC)
             # 保存代理开始位置配置。
@@ -749,6 +801,7 @@ class SettingsTab:
                     retry_key=STATUS_23_RETRY_MAX_KEY,
                     vt_pwd_key=VT_PWD_KEY,
                     fb_delete_num_key=FB_DELETE_NUM_KEY,
+                    vt_delete_num_key=VT_DELETE_NUM_KEY,
                     setting_fb_del_num_key=SETTING_FB_DEL_NUM_KEY,
                     proxyip_start_num_key=PROXYIP_START_NUM_KEY,
                     proxyip_end_num_key=PROXYIP_END_NUM_KEY,
@@ -768,6 +821,8 @@ class SettingsTab:
                     vt_pwd_length=len(vt_pwd_raw_value),
                     fb_delete_num_key=FB_DELETE_NUM_KEY,
                     fb_delete_num_raw_value=fb_delete_num_raw_value,
+                    vt_delete_num_key=VT_DELETE_NUM_KEY,
+                    vt_delete_num_raw_value=vt_delete_num_raw_value,
                     setting_fb_del_num_key=SETTING_FB_DEL_NUM_KEY,
                     setting_fb_del_num_raw_value=setting_fb_del_num_raw_value,
                     proxyip_start_num_key=PROXYIP_START_NUM_KEY,

@@ -10,7 +10,8 @@ autovt/
 │   └── workflows/
 │       └── flet-macos-tag.yml
 ├── apks/
-│   └── facebook.apk
+│   ├── facebook.apk
+│   └── vinted.apk
 ├── autovt/
 │   ├── __init__.py
 │   ├── adb.py
@@ -18,6 +19,14 @@ autovt/
 │   │   ├── __init__.py
 │   │   └── login_service.py
 │   ├── cli.py
+│   ├── emails/
+│   │   ├── __init__.py
+│   │   ├── emails.py
+│   │   ├── fackbook_code.py
+│   │   ├── outlook.py
+│   │   ├── test.py
+│   │   ├── test_vt.py
+│   │   └── vinted_code.py
 │   ├── gui/
 │   │   ├── __init__.py
 │   │   └── app.py
@@ -56,16 +65,20 @@ autovt/
 ## 模块职责
 
 - `main.py`：主入口（默认 GUI），支持 `--mode cli` 回退命令行模式。
-- `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）；设备列表支持 Facebook 安装/卸载批量操作（顶部“`一键删除FB` / `一键安装FB`”）和单设备操作（卡片“`删除FB` / `安装FB`”），包名固定 `com.facebook.katana`，安装包固定外置目录 `apks/facebook.apk`（与 `.exe/.app` 同级）；同时支持 Yosemite 输入法安装（顶部“`一键安装输入法`”与卡片“`安装输入法`”）；设备重操作（启动/停止/重启/安装/卸载）已改为后台线程执行，并增加“单次只允许一个后台动作”保护，避免 Flet 主线程被长耗时 adb/进程控制阻塞；GUI 启动阶段也补了异常兜底，失败时会在页面内展示可读错误而不是直接空白退出；GUI 使用短超时 SQLite 连接（`connect_timeout=1.2s`、`busy_timeout=1200ms`）降低 worker 并发写入时的页面阻塞风险。
+- `autovt/emails/emails.py`：邮箱取码统一入口模块；负责刷新 Outlook `access_token`、拉取最新邮件、按需写入调试 `test.html`，并通过公共流程分发到 Facebook/Vinted 各自解析器；所有刷新、拉信、解析异常都会落到错误日志，便于定位邮箱网络、认证或规则问题。
+- `autovt/emails/fackbook_code.py`：Facebook 邮件验证码解析模块；负责识别 Facebook 相关邮件、从主题或正文附近语义窗口中提取验证码，并支持从调试 HTML 快照离线复现解析结果。
+- `autovt/emails/vinted_code.py`：Vinted 邮件验证码解析模块；负责识别 `no-reply@vinted` 等 Vinted 邮件、只提取 6 位纯数字验证码，并支持直接从 `test.html` 这种调试快照里离线验证规则。
+- `autovt/emails/test_vt.py`：Vinted 取码调试脚本；便于在本地直接调用 `getvinted_code()` 验证真实邮箱流程和调试日志输出。
+- `autovt/gui/app.py`：Flet GUI 主控层（登录页 + 三 Tab（设备列表/账号列表/全局设置）+ 设备操作按钮 + 账号 CRUD 分页 + 自动刷新监控）；设备列表支持 Facebook 安装/卸载批量操作（顶部“`一键删除FB` / `一键安装FB`”）和单设备操作（卡片“`删除FB` / `安装FB`”），也支持 Vinted 安装/卸载批量操作（顶部“`一键删除VT` / `一键安装VT`”）和单设备操作（卡片“`删除VT` / `安装VT`”）；Facebook 包名固定 `com.facebook.katana`、安装包固定外置目录 `apks/facebook.apk`，Vinted 包名固定 `fr.vinted`、安装包固定外置目录 `apks/vinted.apk`（都与 `.exe/.app` 同级）；同时支持 Yosemite 输入法安装（顶部“`一键安装输入法`”与卡片“`安装输入法`”）；设备重操作（启动/停止/重启/安装/卸载）已改为后台线程执行，并增加“单次只允许一个后台动作”保护，避免 Flet 主线程被长耗时 adb/进程控制阻塞；GUI 启动阶段也补了异常兜底，失败时会在页面内展示可读错误而不是直接空白退出；GUI 使用短超时 SQLite 连接（`connect_timeout=1.2s`、`busy_timeout=1200ms`）降低 worker 并发写入时的页面阻塞风险。
 - `autovt/gui/account_importer.py`：账号批量导入逻辑模块（文本文件读取、全量格式校验、国家化 Faker 姓名生成、跳过已存在邮箱、批量写入 `t_user`）；姓名生成逻辑已抽成公共方法 `generate_account_name()`，供批量导入和手动新增共用，避免两边姓名规则不一致。
 - `autovt/gui/account_tab.py`：账号列表 Tab 模块；“新增账号”弹窗会复用导入侧的姓名生成规则，按顶部“姓名国家”自动预填 `first_name/last_name`，并自动带入全局配置 `vt_pwd` 到 `pwd` 输入框，用户打开弹窗即可先看到默认值后再决定是否修改；弹窗关闭改为显式持有 `AlertDialog` 实例并统一调用 `_dismiss_active_dialog()`，同时在标题栏提供单独的关闭按钮，并把保存成功后的列表刷新延后到弹窗关闭之后执行，避免新增成功后弹窗残留不关闭；`on_dismiss` 回调增加“仅清理当前活动弹窗”保护，避免旧弹窗回调误清空新弹窗引用；关闭逻辑优先定向关闭当前账号弹窗实例，不再默认先 `pop` 栈顶弹窗，避免“识别成功提示条（SnackBar）仍在显示时，保存/取消/X 误先关掉提示条而不是表单”；账号弹窗内的“识别成功/识别失败/保存失败”反馈已改为表单内联提示文本，不再使用底部 `SnackBar`，避免底部提示遮挡“取消”按钮；列表卡片新增展示 `fb_fail_num`（Facebook 注册失败累计次数）；状态筛选和编辑下拉新增 `status=4`（风控限制）；顶部新增“一键恢复账号问题”按钮，只会处理 `status=3 and fb_fail_num<3 and fb_status!=1` 的账号，执行后改成 `status=0` 并清空 `device`；按钮右侧会实时显示 `可恢复: N`，表示当前满足恢复条件的账号总数；当前页顶部新增“全选当前页 / 删除全部”，其中“删除全部”只删除当前页已勾选账号；账号列表分页已调整为每页 `50` 条；页面说明文案改为面向普通用户的表述，直接解释“哪些账号能恢复、恢复后会变成什么状态、风控账号不会被处理”；账号页刷新已改为“独立短连接 + 后台线程快照读取”，避免切 Tab、筛选和翻页时直接阻塞 Flet 事件线程；导入/导出也已改为后台线程执行，避免大文件解析、`openpyxl` 写盘和批量写库把界面卡住；编辑账号时会保留数据库中的 `fb_fail_num` 原值，不允许人工修改，也不会因为编辑其他字段而被重置；当 `_active_dialog` 丢失时，关闭动作才继续尝试 `page.pop_dialog()` 兜底关闭当前顶层弹窗；“编辑账号”保持原有手工编辑逻辑，不自动覆盖已有值。
-- `autovt/gui/settings_tab.py`：全局设置 Tab 模块；支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`、`vt_pwd`、`fb_delete_num`、`setting_fb_del_num`，以及新的代理点击范围配置 `proxyip_start_num / proxyip_end_num`；设置表单已改为“双列滚动区 + 底部固定操作栏”，避免内容过长时保存按钮被挤出可视区；代理开始/结束位置在界面中合并为同一卡片内的两个小输入框，便于并排查看；代理配置在 GUI 层限制为 `1~5`，并在保存前校验“代理开始位置不能大于代理结束位置”。
+- `autovt/gui/settings_tab.py`：全局设置 Tab 模块；支持编辑 `mojiwang_run_num`、`status_23_retry_max_num`、`vt_pwd`、`fb_delete_num`、`vt_delete_num`、`setting_fb_del_num`，以及新的代理点击范围配置 `proxyip_start_num / proxyip_end_num`；设置表单已改为“双列滚动区 + 底部固定操作栏”，避免内容过长时保存按钮被挤出可视区；代理开始/结束位置在界面中合并为同一卡片内的两个小输入框，便于并排查看；代理配置在 GUI 层限制为 `1~5`，并在保存前校验“代理开始位置不能大于代理结束位置”。
 - `autovt/auth/login_service.py`：登录服务模块；对齐 Go 版登录协议（AES-GCM + `/bit_login`），并提供本地账号密码缓存（下次启动自动回填）。
 - `autovt/gui/login_view.py`：登录页视图模块；登录请求已改为后台线程执行，避免网络超时或 DNS 慢时直接卡住 Flet 主线程；登录期间会禁用输入框和按钮，并显示“正在登录，请稍候...”提示。
 - `autovt/gui/__init__.py`：GUI 包导出入口（`run_gui`）。
 - `autovt/cli.py`：命令行交互层（用于 `--mode cli` 回退场景）。
 - `autovt/logs.py`：统一日志初始化（终端+文件 JSON、日志级别、第三方 debug 开关）。
-- `autovt/multiproc/manager.py`：主进程生命周期管理；新增 Facebook 批量安装/卸载能力（`install_facebook_all()` / `uninstall_facebook_all()`），通过 ADB 对所有在线设备执行安装包 `apks/facebook.apk` 的安装或包名 `com.facebook.katana` 的卸载；新增 Yosemite 输入法安装能力（`install_yosemite_all()` / `install_yosemite_for_device()`），安装前会基于包名 `com.netease.nie.yosemite` 先判定是否已安装，已安装则直接跳过；manager 内部已去掉常驻 SQLite 连接，改为按需短连接读取/释放账号状态，避免 GUI 后台线程动作触发 SQLite 跨线程异常。
+- `autovt/multiproc/manager.py`：主进程生命周期管理；新增 Facebook 批量安装/卸载能力（`install_facebook_all()` / `uninstall_facebook_all()`），通过 ADB 对所有在线设备执行安装包 `apks/facebook.apk` 的安装或包名 `com.facebook.katana` 的卸载；也新增 Vinted 批量安装/卸载能力（`install_vinted_all()` / `uninstall_vinted_all()`）与单设备能力（`install_vinted_for_device()` / `uninstall_vinted_for_device()`），通过 ADB 对设备执行安装包 `apks/vinted.apk` 的安装或包名 `fr.vinted` 的卸载；新增 Yosemite 输入法安装能力（`install_yosemite_all()` / `install_yosemite_for_device()`），安装前会基于包名 `com.netease.nie.yosemite` 先判定是否已安装，已安装则直接跳过；manager 内部已去掉常驻 SQLite 连接，改为按需短连接读取/释放账号状态，避免 GUI 后台线程动作触发 SQLite 跨线程异常。
 - `autovt/multiproc/worker.py`：单设备子进程执行循环。
 - `autovt/runtime.py`：子进程内 Airtest/Poco 初始化，并维护“进程内 Poco 单例”（`create_poco()` / `get_poco()`）；`setup_device()` 会把解析出的 `adb_path` 注入设备 URI，避免被外部常驻 adb 进程劫持，并记录 `auto_setup/create_poco` 耗时日志。
 - `autovt/ocr/paddle_ocr_service.py`：PaddleOCR 识别服务封装；优先走新版 `predict()`，并兼容旧版 `ocr()`，返回统一结构（`image_path/texts/count/raw`），且识别异常会写入统一日志。
@@ -75,7 +88,7 @@ autovt/
 - `autovt/emails/fackbook_code.py`：Facebook 验证码解析规则模块，支持从邮件列表或调试 HTML（`autovt/emails/test.html`）提取“最新验证码”。
 - `autovt/userdb/user_db.py`：跨平台本地用户库封装（默认 `user.db`，自动建 `t_user` + `t_config`，并提供账号分页查询、CRUD、状态更新、配置读写）；`t_user` 新增 `fb_fail_num` 字段用于记录 Facebook 注册失败累计次数，旧库启动时会自动补列，新增/修改/UPSERT 会统一校验该字段为非负整数；按邮箱回写状态时支持在同一条 SQL 中原子执行 `fb_fail_num = fb_fail_num + 1`，避免并发下先查后改造成覆盖；支持统计“可恢复账号数”与批量恢复可重试的账号问题记录：命中 `status=3 and fb_fail_num<3 and fb_status!=1` 的账号会被统计到按钮右侧 `可恢复: N`，批量恢复时会统一改成 `status=0` 并清空 `device`；`t_config` 默认配置已包含 `proxyip_start_num=1` 与 `proxyip_end_num=1`，并对两项配置执行 `1~5` 的范围校验。
 - `autovt/tasks/task_context.py`：任务上下文对象（`TaskContext`，统一承载设备 serial/locale/lang，并通过 `extras` 扩展自定义字段）；当设备语言读取失败或返回 `unknown` 时，会稳定回退到 `en-US/en`，避免任务层继续拿 `unknown` 去做多语言字典索引。
-- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并先执行 `setup_device() + create_poco()` 重建整套运行时；若当前步骤重试后仍是连接异常，则立即抛给 worker 执行 `reinit_runtime()`，避免脚本带着失效的触控/输入通道继续往下跑；图片模板点击统一走 `_safe_click_image_template()`，内部支持资源路径解析、`Template(record_pos/resolution)` 透传和 `TargetNotFoundError` 安全兜底，避免可选图片未出现时直接把整轮任务打挂；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当命中特定“被风控了”页面时，会单独把账号写成 `status=4`（风控限制）；Facebook 失败回写 `t_user` 时会原子累加 `fb_fail_num`，成功时不会清零；当检测到设备连接异常时会跳过失败状态回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；支持 `fb_delete_num` 配置（`0=仅清理`、`>0` 且 `worker_loop_seq % fb_delete_num == 0` 时执行卸载+重装），也支持 `setting_fb_del_num` 配置（`0=不清理`、`>0` 且 `worker_loop_seq % setting_fb_del_num == 0` 时执行 `setting_clean_fb()`，自动打开系统设置并循环删除 Facebook 账号）；`nekobox_run_all()` 会读取新的代理点击范围配置 `proxyip_start_num / proxyip_end_num`，把用户输入的 `1-based` 范围转换为安全的 `0-based` 随机索引，并根据当前 `mode_children` 数量自动收缩可选范围，保证不越界；当 `mode_children` 为空时直接记录错误并返回 `False`；由 worker 每轮注入 `worker_loop_seq` 到 `TaskContext.extras` 后在任务层判定执行；任务结束会主动关闭任务内 `UserDB` 连接。
+- `autovt/tasks/open_settings.py`：单轮业务动作（`OpenSettingsTask` 类 + `run_once(task_context)` 严格必传上下文）；`_safe_wait_exists/_safe_click/_safe_input_on_focused` 增加统一异常兜底，捕捉 Poco/ADB 断连（如 `TransportDisconnected`、`device not found`）并先执行 `setup_device() + create_poco()` 重建整套运行时；若当前步骤重试后仍是连接异常，则立即抛给 worker 执行 `reinit_runtime()`，避免脚本带着失效的触控/输入通道继续往下跑；图片模板点击统一走 `_safe_click_image_template()`，内部支持资源路径解析、`Template(record_pos/resolution)` 透传和 `TargetNotFoundError` 安全兜底，避免可选图片未出现时直接把整轮任务打挂；输入链路支持 `text -> adb shell input text -> set_clipboard/paste` 多级兜底，降低打包环境输入失败概率；当账号 `pwd` 为空时会用全局配置 `vt_pwd` 兜底；`facebook_run_all()` 中关键 Poco 步骤失败（典型 `_facebook_fail`）时，会先尝试处理系统权限干扰弹框（如 `permission_allow_button/android:id/button1`），命中后仅重试当前失败步骤一次，不会重跑 Facebook 整流程；当命中特定“被风控了”页面时，会单独把账号写成 `status=4`（风控限制）；Facebook 失败回写 `t_user` 时会原子累加 `fb_fail_num`，成功时不会清零；当检测到设备连接异常时会跳过失败状态回写，避免把断连误判为账号问题，并抛给 worker 触发 `reinit_runtime()` 重建运行时；支持 `fb_delete_num` 配置（`0=仅清理`，`1=每次都重装`，`2=从第2次开始每次都重装`，`3=从第3次开始每次都重装`）、`vt_delete_num` 配置（`0=仅清理`，`1=每次都重装`，`2=从第2次开始每次都重装`，`3=从第3次开始每次都重装`，仅在 vinted 模式执行 `apks/vinted.apk` 重装），也支持 `setting_fb_del_num` 配置（`0=不清理`、`>0` 且 `worker_loop_seq % setting_fb_del_num == 0` 时执行 `setting_clean_fb()`，自动打开系统设置并循环删除 Facebook 账号）；`nekobox_run_all()` 会读取新的代理点击范围配置 `proxyip_start_num / proxyip_end_num`，把用户输入的 `1-based` 范围转换为安全的 `0-based` 随机索引，并根据当前 `mode_children` 数量自动收缩可选范围，保证不越界；当 `mode_children` 为空时直接记录错误并返回 `False`；由 worker 每轮注入 `worker_loop_seq` 到 `TaskContext.extras` 后在任务层判定执行；任务结束会主动关闭任务内 `UserDB` 连接。
 - `autovt/settings.py`：项目配置（日志、图片、adb、循环间隔、容错参数）。
 - `test.py`：单方法快速调试入口（可直接调 `OpenSettingsTask` 指定方法）；退出清理时对 `poco.stop_running()` 增加超时保护，避免 `Ctrl+C` 后 cleanup 阶段再次卡住；调试时若设备断开，会把 Poco 后台线程的断连堆栈降级成简短提示，并按“调试流程结束”友好退出，减少 `Thread-1` 噪音。
 - `.github/workflows/flet-macos-tag.yml`：GitHub Actions 打包流水线（推送 tag 后自动执行 `macOS + Windows` 的 `flet pack(PyInstaller)` 并上传 Release 产物）；不再把 `apks/facebook.apk` 打进可执行文件，改为在发布 zip 中与 `.exe/.app` 同级提供外置 `apks/` 目录；仍会显式打包 `poco/drivers/android` 与 `airtest/core/android` 整目录（含 `pocoservice-debug.apk`、`Yosemite.apk`），并在构建前校验关键 apk 存在，避免输入相关资源缺失。
@@ -208,6 +221,7 @@ autovt/
    - `t_config.status_23_retry_max_num=0`（缺失才写入，表示默认不重试）。
    - `t_config.vt_pwd=''`（缺失才写入，空值表示不启用全局密码兜底）。
    - `t_config.fb_delete_num=0`（缺失才写入，默认仅清理 Facebook 数据，不执行重装）。
+   - `t_config.vt_delete_num=0`（缺失才写入，默认仅清理 Vinted 数据，不执行重装）。
    - `t_config.setting_fb_del_num=0`（缺失才写入，默认不执行“设置页删除 Facebook 账号”流程）。
 
 ### 3) 索引
@@ -243,7 +257,8 @@ autovt/
    - 读取单项、读取 map、更新配置。
    - `mojiwang_run_num` 限制为 `1~100`。
    - `status_23_retry_max_num` 限制为 `0~5`。
-   - `fb_delete_num` 限制为 `0~10000`（`0` 不删除，其他数字每隔第几次重装；命中条件为 `worker_loop_seq % fb_delete_num == 0`）。
+   - `fb_delete_num` 限制为 `0~10000`（`0` 不删除；`1` 每次都重装；`2` 从第2次开始每次都重装；`3` 从第3次开始每次都重装；命中条件为 `worker_loop_seq >= fb_delete_num`）。
+   - `vt_delete_num` 限制为 `0~10000`（`0` 不删除；`1` 每次都重装；`2` 从第2次开始每次都重装；`3` 从第3次开始每次都重装；命中条件为 `worker_loop_seq >= vt_delete_num`，仅在 vinted 模式执行）。
 
 ## 扩展建议
 
@@ -295,12 +310,13 @@ Flet 打包与图标/名称替换说明见 `doc/flet_packaging.md`。
 - `status_23_retry_max_num` 规则：仅允许 `0~5` 整数（`0`=不重试，`1`=重试 1 次，`3`=重试 3 次，最大 `5` 次）
 - 设置 Tab 的 `status_23_retry_max_num` 输入框在 Flet UI 层已加输入限制：仅允许输入 `0~5` 单个数字
 - `vt_pwd` 规则：允许空值；非空时长度不超过 `256` 字符
-- `fb_delete_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不删除，其他数字每隔第几次重装”
+- `fb_delete_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不删除，1 每次都重装，2 从第2次开始每次都重装，3 从第3次开始每次都重装”
+- `vt_delete_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不删除，1 每次都重装，2 从第2次开始每次都重装，3 从第3次开始每次都重装”
 - `setting_fb_del_num` 规则：仅允许 `0~10000` 整数；配置说明文案为“0 不清理，其他数字每隔第几次执行设置页 Facebook 账号清理”
 - 登录页：默认走加密 API 登录；当环境变量 `GITXUZAN_LOGIN=1` 时跳过 API 登录校验（任意账号密码可登录）
 - 登录页：登录成功后会写入本地缓存，重新打开软件自动回填上次账号密码
 - 登录页：`401 Unauthorized` 按“账号或密码错误”处理，只打印告警日志，不输出异常堆栈
-- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`、`vt_pwd=''`、`fb_delete_num=0`、`setting_fb_del_num=0`（缺失时自动补齐）
+- `t_config` 默认值：`mojiwang_run_num=3`、`status_23_retry_max_num=0`、`vt_pwd=''`、`fb_delete_num=0`、`vt_delete_num=0`、`setting_fb_del_num=0`（缺失时自动补齐）
 - GUI 已去掉：`once/run_once` 单轮手动触发入口
 
 ## 多设备账号分配规则（当前版）

@@ -4,6 +4,8 @@ __author__ = "admin"
 
 # 导入日志模块，用于记录调试过程和错误信息。
 import logging
+# 导入数学模块，用于计算贝塞尔曲线路径。
+import math
 # 导入随机模块，用于随机选择图片索引。
 import random
 # 导入路径模块，用于构造日志目录和项目根目录。
@@ -11,8 +13,10 @@ from pathlib import Path
 
 # 导入 Airtest 命令行初始化函数。
 from airtest.cli.parser import cli_setup
-# 导入 Airtest 自动初始化函数。
-from airtest.core.api import auto_setup
+# 导入 Airtest 自动初始化函数和常用操作对象。
+from airtest.core.api import Template, auto_setup, loop_find, snapshot
+# 导入 Airtest 全局设备对象。
+from airtest.core.helper import G
 # 导入 Poco Android 驱动。
 from poco.drivers.android.uiautomation import AndroidUiautomationPoco
 
@@ -71,33 +75,158 @@ poco = AndroidUiautomationPoco(use_airtest_input=True, screenshot_each_action=Fa
 snapshot(msg="请填写测试点.")
 
 
-bools = poco("M’aider à me connecter").exists()
-print(f"当前状态是: {bools}")
 
 
-bools = poco(text="La Page n’est pas disponible pour le moment").exists()
-
-print(f"当前状态是v2: {bools}")
 
 
-     
-poco("android.view.View").click()
-poco("Application prédite : Facebook").click()
-poco("android.widget.Button").click()
-poco("android.view.View").click()
-
-poco(text="Create new account").click()
+# 点击注册 self.poco_find_or_click( 等待 10s
+poco("fr.vinted:id/show_registration_options_button").click()
 
 
-poco("Mot de passe").click()
-poco("android.widget.FrameLayout").offspring("android:id/content").child("com.facebook.katana:id/(name removed)").child("com.facebook.katana:id/(name removed)").child("android.widget.FrameLayout").child("android.widget.FrameLayout").child("android.widget.FrameLayout")[1].child("android.widget.FrameLayout")[0].child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").offspring("Retour").child("android.view.ViewGroup").child("android.view.ViewGroup").child("android.view.ViewGroup").click()
 
-poco(text="Suivant").click()
-
-poco("Mot de passe").click()
+# 点击邮箱 self.poco_find_or_click( 等待 5s
+poco("fr.vinted:id/email_action_button").click()
 
 
-poco("Créez un mot de passe").click()
+
+# 输入用户Id t_user 表的 email_pwd + 4位数的随机(1000 到 9999） ,需要点击粘贴， _safe_click 和 _safe_input_on_focused
+poco(textMatches="^Nom d'utilisateur.*$").click()
+
+
+# 输入邮箱  t_user 表的 email_account ，需要点击粘贴， _safe_click 和 _safe_input_on_focused
+poco(text="Email. ").click()
+
+
+
+
+
+# 输入密码  t_user 表的 pwd ，需要点击粘贴 ，_safe_click 和 _safe_input_on_focused
+poco(textMatches="^Mot de passe.*$").click()
+
+
+# 点击勾选 self.poco_find_or_click( 等待 2s
+poco("fr.vinted:id/terms_and_conditions_checkbox").click()
+
+
+# 点击注册 self.poco_find_or_click( 等待 2s
+poco("fr.vinted:id/email_register_sign_up").click()
+
+
+
+# 下面滑块等待 10s 封装成一个方法  ， 返回true 和 false 
+
+
+import random
+# 导入日志模块，用于记录调试过程和错误信息。
+import logging
+# 导入数学模块，用于计算贝塞尔曲线路径。
+import math
+# 导入随机模块，用于随机选择图片索引。
+import random
+# 定义滑块模板对象，用于识别滑块当前位置。
+slider_template = Template(r"tpl1774108524633.png", record_pos=(-0.25, -0.3), resolution=(1080, 2340))
+
+# 使用异常保护滑块拖动流程，确保失败时能写入错误日志。
+try:
+    # 记录准备开始执行滑块拖动。
+    logger.info("开始执行底部滑块贝塞尔曲线拖动测试。")
+    # 识别滑块起点坐标。
+    slider_start = loop_find(slider_template, timeout=10)
+    # 记录识别到的滑块起点。
+    logger.info("识别到滑块起点坐标：%s", slider_start)
+    # 获取当前设备屏幕分辨率。
+    screen_width, screen_height = G.DEVICE.get_current_resolution()
+    # 记录当前设备分辨率，便于排查轨迹偏移问题。
+    logger.info("当前设备分辨率：width=%s height=%s", screen_width, screen_height)
+    # 计算终点横坐标，直接逼近屏幕最右侧安全边界，提升完成速度。
+    slider_end_x = screen_width - random.randint(12, 24)
+    # 计算终点纵坐标，只保留极小波动，避免末端偏离滑道。
+    slider_end_y = slider_start[1] + random.randint(-4, 4)
+    # 计算第一段贝塞尔控制点一的横坐标，模拟起手加速。
+    control_1_x = slider_start[0] + int((slider_end_x - slider_start[0]) * random.uniform(0.20, 0.30))
+    # 计算第一段贝塞尔控制点一的纵坐标，加入轻微向下偏移。
+    control_1_y = slider_start[1] + random.randint(4, 16)
+    # 计算第二段贝塞尔控制点二的横坐标，模拟中段稳定推进。
+    control_2_x = slider_start[0] + int((slider_end_x - slider_start[0]) * random.uniform(0.72, 0.84))
+    # 计算第二段贝塞尔控制点二的纵坐标，加入轻微向上回正。
+    control_2_y = slider_start[1] + random.randint(-14, 8)
+    # 生成轨迹采样点数量，减少点数以提升滑动速度。
+    curve_point_count = random.randint(5, 7)
+    # 初始化滑动轨迹点列表。
+    swipe_points = []
+    # 生成单段贝塞尔曲线点，保证持续按压并快速向右推进。
+    for index in range(curve_point_count):
+        # 计算当前采样点的时间参数。
+        t = index / float(curve_point_count)
+        # 计算曲线的补余参数。
+        one_minus_t = 1 - t
+        # 计算曲线点的横坐标。
+        point_x = int(
+            (one_minus_t ** 3) * slider_start[0]
+            + 3 * (one_minus_t ** 2) * t * control_1_x
+            + 3 * one_minus_t * (t ** 2) * control_2_x
+            + (t ** 3) * slider_end_x
+        )
+        # 计算曲线点的纵坐标，并加入轻微抖动。
+        point_y = int(
+            (one_minus_t ** 3) * slider_start[1]
+            + 3 * (one_minus_t ** 2) * t * control_1_y
+            + 3 * one_minus_t * (t ** 2) * control_2_y
+            + (t ** 3) * slider_end_y
+            + math.sin(t * math.pi) * random.uniform(-2.0, 2.0)
+        )
+        # 把曲线点纵坐标限制在屏幕安全区域内。
+        point_y = max(20, min(screen_height - 20, point_y))
+        # 追加曲线轨迹点。
+        swipe_points.append((point_x, point_y))
+    # 生成轻微过冲点，模拟真实手势惯性，同时保证到达最右边。
+    overshoot_point = (screen_width - random.randint(4, 10), max(20, min(screen_height - 20, slider_end_y + random.randint(-2, 2))))
+    # 生成回拉修正点，模拟人手二次微调。
+    settle_point = (screen_width - random.randint(10, 18), max(20, min(screen_height - 20, slider_end_y + random.randint(-2, 2))))
+    # 追加过冲点到轨迹末尾。
+    swipe_points.append(overshoot_point)
+    # 追加回拉修正点到轨迹末尾。
+    swipe_points.append(settle_point)
+    # 记录本次实际生成的轨迹点。
+    logger.info("本次生成滑动轨迹点数量：%s，轨迹点：%s", len(swipe_points), swipe_points)
+    # 使用多点滑动执行贝塞尔拟人轨迹，并缩短整体耗时。
+    G.DEVICE.swipe_along(swipe_points, duration=round(random.uniform(0.42, 0.62), 2), steps=random.randint(8, 12))
+    # 记录滑块拖动执行完成。
+    logger.info("底部滑块贝塞尔曲线拖动执行完成。")
+# 捕获所有异常并写入错误日志，方便手动测试排查。
+except Exception:
+    # 记录滑块拖动失败的完整异常堆栈。
+    logger.exception("底部滑块贝塞尔曲线拖动失败。")
+    # 失败时截图，便于定位页面状态和滑块位置。
+    snapshot(msg="底部滑块贝塞尔曲线拖动失败")
+
+
+
+
+
+# /Users/admin/go/src/autovt/autovt/tasks/vinted.py 465 行 追加下面逻辑， 参考该文件使用的方法，下面只是大概流程，
+
+
+# 点击接受 ，查找点击 最多等待 40s
+poco(text="Accepter tout").click()
+
+
+# 点击验证码框架 ,最多等待 10s 
+poco("fr.vinted:id/view_input_value").click()
+
+
+# 获取vinted 验证码 参考 /Users/admin/go/src/autovt/autovt/emails/test_vt.py, 如果没获取成功验证码成功，重试5次， 每次等待 15s ,然后输入粘贴
+
+# 提交验证码， 等待10s
+poco("fr.vinted:id/verify_code_button").click()
+
+
+poco("fr.vinted:id/view_input_value").click()
+
+
+
+
+
 
 
 

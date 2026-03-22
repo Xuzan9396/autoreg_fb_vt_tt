@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# 导入操作系统模块，用于读取父进程 PID。
+import os
 # 导入 sqlite3，用于识别数据库锁冲突异常并做降级等待。
 import sqlite3
 # 导入信号模块，用于设置子进程 Ctrl+C 行为。
@@ -11,8 +13,9 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from autovt.adb import safe_path_part
+from autovt.adb import resolve_adb_bin, safe_path_part
 from autovt.logs import apply_third_party_log_policy, get_logger, setup_logging
+from autovt.multiproc.process_guard import cleanup_autovt_helper_processes, start_parent_watchdog
 from autovt.settings import (
     WORKER_INIT_RETRY_DELAY_SEC,
     WORKER_MAX_CONSECUTIVE_UNKNOWN_ERRORS,
@@ -33,10 +36,27 @@ from autovt.userdb import (
     STATUS_23_RETRY_MAX_DEFAULT,
     STATUS_23_RETRY_MAX_KEY,
     STATUS_23_RETRY_MIN,
+    VT_DELETE_NUM_DEFAULT,
+    VT_DELETE_NUM_KEY,
     VT_PWD_DEFAULT,
     VT_PWD_KEY,
     UserDB,
 )
+
+# 定义允许的注册方式集合，供 worker 启动时统一校验。
+VALID_REGISTER_MODES = {"facebook", "vinted"}
+# 定义注册方式到状态字段名的映射，供账号领取筛选与重试判断复用。
+REGISTER_MODE_STATUS_FIELD_MAP = {
+    # Facebook 模式读取 fb_status 字段。
+    "facebook": "fb_status",
+    # Vinted 模式读取 vinted_status 字段。
+    "vinted": "vinted_status",
+}
+
+
+def _normalize_register_mode(raw: str) -> str:
+    # 把原始注册方式统一转成小写字符串，避免大小写和空白影响判断。
+    return str(raw or "").strip().lower()
 
 
 def _normalize_locale(raw: str) -> str:
@@ -135,11 +155,12 @@ def _sleep_with_stop(stop_event: mp.Event, sec: float) -> None:
 
 def _install_worker_signal_policy(log: Any) -> None:
     # 在 worker 子进程中忽略 Ctrl+C（SIGINT），避免 Airtest 退出清理被打断打印 traceback。
+    # worker 真正的生命周期收口由 manager stop_event 和父进程 watchdog 共同负责。
     try:
         # 设置 SIGINT 为忽略，让主进程负责统一停机。
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         # 记录信号策略生效日志，便于排查退出行为。
-        log.info("worker 已设置 SIGINT 忽略策略，停机由 manager 统一控制")
+        log.info("worker 已设置 SIGINT 忽略策略，停机由 manager 与父进程 watchdog 统一控制")
     # 信号设置失败时只记录告警，不阻断主流程。
     except Exception as exc:
         # 记录失败详情，便于定位平台差异问题。
@@ -182,6 +203,30 @@ def _read_fb_delete_num(config_map: dict[str, str]) -> int:
     except Exception:
         # 返回默认值 0（仅清理，不重装）。
         return int(FB_DELETE_NUM_DEFAULT)
+    # 小于最小值时回退到最小值。
+    if parsed_value < FB_DELETE_NUM_MIN:
+        # 返回最小值。
+        return FB_DELETE_NUM_MIN
+    # 大于最大值时截断到最大值。
+    if parsed_value > FB_DELETE_NUM_MAX:
+        # 返回最大值。
+        return FB_DELETE_NUM_MAX
+    # 返回合法配置值（0=仅清理，>0=按周期触发重装）。
+    return parsed_value
+
+
+def _read_vt_delete_num(config_map: dict[str, str]) -> int:
+    # 从 t_config 映射读取 Vinted 重装周期配置，并做边界保护。
+    # 读取配置原始值，缺失时回退默认值 0。
+    raw_value = str(config_map.get(VT_DELETE_NUM_KEY, VT_DELETE_NUM_DEFAULT)).strip()
+    # 尝试解析整数。
+    try:
+        # 转成整数，便于后续范围校验。
+        parsed_value = int(raw_value)
+    # 非法值（如空串或非数字）时回退默认值。
+    except Exception:
+        # 返回默认值 0（仅清理，不重装）。
+        return int(VT_DELETE_NUM_DEFAULT)
     # 小于最小值时回退到最小值。
     if parsed_value < FB_DELETE_NUM_MIN:
         # 返回最小值。
@@ -400,6 +445,7 @@ def _handle_run_error(
 
 def worker_main(
     serial: str,
+    register_mode: str,
     loop_interval_sec: float,
     stop_event: mp.Event,
     command_queue: mp.Queue,
@@ -412,9 +458,63 @@ def worker_main(
     # 每个子进程单独初始化日志（单独文件 + 终端 JSON）。
     setup_logging(process_role="worker", serial=serial)
     log = get_logger("worker")
+    # 记录当前 worker 启动时的父进程 PID，供后续 watchdog 监控生命周期。
+    parent_pid = int(os.getppid() or 0)
+    # 预先解析当前项目 adb 路径，供 finally 自清理辅助进程复用。
+    helper_adb_bin = ""
+    # 尝试解析项目 adb 路径，解析失败时只记日志不阻断 worker 启动。
+    try:
+        # 解析当前 worker 对应的项目 adb 绝对路径。
+        helper_adb_bin = resolve_adb_bin()
+    # adb 解析失败时仅记日志，避免影响主流程。
+    except Exception as exc:
+        # 记录解析失败详情，便于排查辅助进程自清理失效原因。
+        log.exception("worker 解析 adb 路径失败，辅助进程自清理将降级", serial=serial, error=str(exc))
+    # 标准化当前 worker 的注册方式参数。
+    normalized_register_mode = _normalize_register_mode(register_mode)
+    # 注册方式非法时直接上报 fatal，避免 worker 空转。
+    if normalized_register_mode not in VALID_REGISTER_MODES:
+        # 生成可读错误详情，方便 GUI 直接展示。
+        detail = f"注册方式非法: {register_mode}"
+        # 向主进程上报 fatal 状态。
+        _emit(event_queue, serial, "fatal", detail)
+        # 记录错误日志，便于排查启动链路问题。
+        log.error("worker 启动失败：注册方式非法", serial=serial, register_mode=register_mode)
+        # 直接退出当前 worker。
+        return
+    # 解析当前模式对应的状态字段名，供账号重试判断复用。
+    status_field_name = REGISTER_MODE_STATUS_FIELD_MAP[normalized_register_mode]
     # 应用 worker 信号策略，避免 Ctrl+C 直接打断子进程清理逻辑。
     _install_worker_signal_policy(log)
-    log.info("worker 进程启动", serial=serial, loop_interval_sec=loop_interval_sec)
+    # 记录 worker 启动日志，同时带上 parent pid 便于排查父子生命周期关系。
+    log.info(
+        "worker 进程启动",
+        serial=serial,
+        register_mode=normalized_register_mode,
+        status_field_name=status_field_name,
+        loop_interval_sec=loop_interval_sec,
+        parent_pid=parent_pid,
+    )
+    # 定义父进程退出后的停机回调，确保 manager 消失时 worker 会主动收口。
+    def _stop_by_parent_exit() -> None:
+        # 已处于停机状态时无需重复触发。
+        if stop_event.is_set():
+            # 当前 stop_event 已置位，直接结束回调。
+            return
+        # 先向主进程事件队列上报 stopping，便于日志追踪。
+        _emit(event_queue, serial, "stopping", f"检测到父进程已退出 parent_pid={parent_pid}")
+        # 记录父进程失联日志，方便确认 watchdog 生效。
+        log.error("检测到父进程已退出，worker 准备停机", serial=serial, parent_pid=parent_pid)
+        # 设置 stop_event，通知主循环尽快退出。
+        stop_event.set()
+    # 启动父进程 watchdog，保证源码模式终端结束后 worker 会跟着收口。
+    start_parent_watchdog(
+        parent_pid=parent_pid,
+        log=log,
+        stop_callback=_stop_by_parent_exit,
+        interval_sec=1.0,
+        thread_name=f"autovt-parent-watchdog-{safe_path_part(serial)}",
+    )
 
     # 先声明数据库对象占位，便于启动失败时安全关闭。
     user_db: UserDB | None = None
@@ -426,8 +526,14 @@ def worker_main(
         user_db.connect()
         # 延迟导入运行时模块，避免主控进程被设备依赖拖住。
         from autovt.runtime import create_poco as imported_create_poco, setup_device as imported_setup_device
-        # 导入“单轮任务函数”，worker 通过循环重复调用它。
-        from autovt.tasks.open_settings import run_once as imported_run_once
+        # Facebook 模式导入原有设置页任务入口。
+        if normalized_register_mode == "facebook":
+            # 导入 Facebook 任务执行入口。
+            from autovt.tasks.open_settings import run_once as imported_task_run_once
+        # Vinted 模式导入新的 Vinted 任务入口。
+        else:
+            # 导入 Vinted 任务执行入口。
+            from autovt.tasks.vinted import run_once as imported_task_run_once
     # 启动期任一步失败都统一记录并上报 fatal，避免主进程只能看到 exit_code。
     except Exception as exc:
         # 格式化异常摘要，便于主进程和 GUI 直接展示。
@@ -452,6 +558,13 @@ def worker_main(
     airtest_errors = _load_airtest_error_types()
     # 子进程内缓存任务上下文对象。
     task_context = _build_task_context(serial=serial, locale="unknown")
+    # 把当前注册方式写入任务上下文扩展字段，供任务层读取。
+    task_context.extras = {
+        "register_mode": normalized_register_mode,
+        "parent_pid": int(parent_pid),
+    }
+    # 组装当前模式对应的领取池说明，供多个闭包统一复用。
+    claim_condition_text = f"status=0 且 {status_field_name}=0"
 
     # 当前设备绑定的一条账号记录。
     assigned_user: dict[str, Any] | None = None
@@ -461,9 +574,9 @@ def worker_main(
     waiting_for_user = False
 
     # 定义“是否允许同账号重试”的局部判断方法。
-    def _should_retry_same_user(status: int, fb_status: int) -> bool:
-        # 当 Facebook 状态已成功时，禁止继续重试同一账号，避免重复执行。
-        if fb_status == 1:
+    def _should_retry_same_user(status: int, register_status: int) -> bool:
+        # 当前注册方式已成功时，禁止继续重试同一账号，避免重复执行。
+        if register_status == 1:
             # 返回 False，表示不允许重试。
             return False
         # 仅账号状态为 3（失败）时允许重试；状态 2（已使用）不再重试。
@@ -486,8 +599,8 @@ def worker_main(
             if latest is not None and str(latest.get("device", "")).strip() == serial:
                 # 读取数据库中的最新 status。
                 current_status = int(latest.get("status", 0))
-                # 读取数据库中的最新 fb_status。
-                current_fb_status = int(latest.get("fb_status", 0))
+                # 读取数据库中当前注册方式对应的状态值。
+                current_register_status = int(latest.get(status_field_name, 0))
                 # 读取邮箱用于日志追踪。
                 email_account = str(latest.get("email_account", "")).strip()
                 # status=1 表示“仍在使用中”，继续跑同一个账号，不切换。
@@ -501,7 +614,7 @@ def worker_main(
                 # status=2/3 时按“失败才重试、成功不重试”规则处理。
                 if current_status in {2, 3}:
                     # 不满足重试条件时释放绑定并切换新账号。
-                    if not _should_retry_same_user(current_status, current_fb_status):
+                    if not _should_retry_same_user(current_status, current_register_status):
                         # 释放当前账号与设备绑定，避免同账号重复执行。
                         user_db.clear_device_by_user_id(user_id)
                         # 记录“跳过重试”的决策日志，便于回溯为何切换账号。
@@ -510,7 +623,8 @@ def worker_main(
                             serial=serial,
                             user_id=user_id,
                             status=current_status,
-                            fb_status=current_fb_status,
+                            register_mode=normalized_register_mode,
+                            register_status=current_register_status,
                             email_account=email_account,
                         )
                         # 清空当前账号缓存。
@@ -525,11 +639,12 @@ def worker_main(
                         assigned_user = dict(latest)
                         # 记录“同账号重试”日志，便于排查。
                         log.info(
-                            "账号状态为 3 且 fb_status 非成功，继续复用当前账号重试",
+                            "账号状态为 3 且当前注册方式未成功，继续复用当前账号重试",
                             serial=serial,
                             user_id=user_id,
                             status=current_status,
-                            fb_status=current_fb_status,
+                            register_mode=normalized_register_mode,
+                            register_status=current_register_status,
                             email_account=email_account,
                             retry_index=assigned_status_23_retry_used,
                             retry_limit=retry_limit,
@@ -544,7 +659,8 @@ def worker_main(
                         serial=serial,
                         user_id=user_id,
                         status=current_status,
-                        fb_status=current_fb_status,
+                        register_mode=normalized_register_mode,
+                        register_status=current_register_status,
                         email_account=email_account,
                         retry_count=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
@@ -584,8 +700,8 @@ def worker_main(
             bound_user_id = int(bound_row.get("id", 0))
             # 读取绑定账号状态。
             bound_status = int(bound_row.get("status", 0))
-            # 读取绑定账号 Facebook 状态。
-            bound_fb_status = int(bound_row.get("fb_status", 0))
+            # 读取绑定账号当前注册方式对应的状态值。
+            bound_register_status = int(bound_row.get(status_field_name, 0))
             # 读取绑定邮箱用于日志追踪。
             bound_email = str(bound_row.get("email_account", "")).strip()
             # 绑定且运行中时直接复用。
@@ -599,7 +715,7 @@ def worker_main(
             # 绑定账号处于 2/3 状态时按“失败才重试、成功不重试”规则处理。
             if bound_status in {2, 3}:
                 # 不满足重试条件时释放绑定并等待新账号。
-                if not _should_retry_same_user(bound_status, bound_fb_status):
+                if not _should_retry_same_user(bound_status, bound_register_status):
                     # 释放当前绑定账号，避免重复执行已成功账号。
                     user_db.clear_device_by_user_id(bound_user_id)
                     # 记录“跳过重试”日志。
@@ -608,7 +724,8 @@ def worker_main(
                         serial=serial,
                         user_id=bound_user_id,
                         status=bound_status,
-                        fb_status=bound_fb_status,
+                        register_mode=normalized_register_mode,
+                        register_status=bound_register_status,
                         email_account=bound_email,
                     )
                     # 重置重试计数器。
@@ -622,11 +739,12 @@ def worker_main(
                     # 写回当前账号缓存。
                     assigned_user = dict(bound_row)
                     log.info(
-                        "发现设备绑定账号处于 3 且 fb_status 非成功，继续复用当前账号重试",
+                        "发现设备绑定账号处于 3 且当前注册方式未成功，继续复用当前账号重试",
                         serial=serial,
                         user_id=bound_user_id,
                         status=bound_status,
-                        fb_status=bound_fb_status,
+                        register_mode=normalized_register_mode,
+                        register_status=bound_register_status,
                         email_account=bound_email,
                         retry_index=assigned_status_23_retry_used,
                         retry_limit=retry_limit,
@@ -640,7 +758,8 @@ def worker_main(
                     serial=serial,
                     user_id=bound_user_id,
                     status=bound_status,
-                    fb_status=bound_fb_status,
+                    register_mode=normalized_register_mode,
+                    register_status=bound_register_status,
                     email_account=bound_email,
                     retry_count=assigned_status_23_retry_used,
                     retry_limit=retry_limit,
@@ -665,9 +784,9 @@ def worker_main(
                 # 清空缓存。
                 assigned_user = None
 
-        # 核心分配：事务加锁领取一条 status=0 的账号，并置为 status=1 + device=serial。
-        # 尝试领取一条未使用账号。
-        assigned_user = user_db.claim_user_for_device(serial)
+        # 核心分配：事务加锁领取一条满足当前模式筛选条件的账号，并置为 status=1 + device=serial。
+        # 尝试领取一条未使用且当前模式未注册的账号。
+        assigned_user = user_db.claim_user_for_device(serial, status_field_name)
         # 没有可分配账号时返回空，让上层进入等待态。
         if assigned_user is None:
             return None
@@ -692,6 +811,7 @@ def worker_main(
                 STATUS_23_RETRY_MAX_KEY: STATUS_23_RETRY_MAX_DEFAULT,
                 VT_PWD_KEY: VT_PWD_DEFAULT,
                 FB_DELETE_NUM_KEY: FB_DELETE_NUM_DEFAULT,
+                VT_DELETE_NUM_KEY: VT_DELETE_NUM_DEFAULT,
                 SETTING_FB_DEL_NUM_KEY: SETTING_FB_DEL_NUM_DEFAULT,
             # 回退默认配置，确保任务循环可继续运行。
             }
@@ -699,17 +819,32 @@ def worker_main(
 
         # 结合配置（含重试次数）拿到当前可运行账号。
         current_user = _ensure_assigned_user(config_map)
+        # 为当前等待态构造稳定的本地领取池文案，避免闭包变量异常影响主循环。
+        waiting_claim_condition_text = f"status=0 且 {status_field_name}=0"
         # 无可用账号时进入等待态，不执行任务。
         if current_user is None:
             if not waiting_for_user:
-                _emit(event_queue, serial, "waiting", "无可用账号(status=0) 或重试结束，等待中")
-                log.info("无可用账号(status=0) 或重试结束，worker 进入等待", serial=serial)
+                # 上报当前模式领取池为空，便于界面直接看出筛选条件。
+                _emit(event_queue, serial, "waiting", f"无可用账号({waiting_claim_condition_text}) 或重试结束，等待中")
+                # 记录当前模式领取池为空日志，便于排查是 FB 池还是 VT 池耗尽。
+                log.info(
+                    "无可用账号或重试结束，worker 进入等待",
+                    serial=serial,
+                    register_mode=normalized_register_mode,
+                    claim_condition=waiting_claim_condition_text,
+                )
             waiting_for_user = True
             return None
 
         # 把最新账号数据和配置映射写回任务上下文。
         task_context.user_info = dict(current_user)
         task_context.config_map = {str(k): str(v) for k, v in config_map.items()}
+        # 把当前注册方式持续写入上下文 extras，避免运行时重建后丢失。
+        task_context.extras = {
+            **dict(task_context.extras or {}),
+            "register_mode": normalized_register_mode,
+            "parent_pid": int(parent_pid),
+        }
 
         email_account = str(current_user.get("email_account", "")).strip()
         # 从等待态恢复时上报一次“已拿到账号”。
@@ -794,14 +929,18 @@ def worker_main(
         worker_loop_seq += 1
         # 复制 extras 映射，避免直接复用共享引用。
         extras = dict(runtime_context.extras or {})
+        # 写入当前 worker 使用的注册方式，供任务层决定执行哪条业务路径。
+        extras["register_mode"] = normalized_register_mode
         # 写入当前 worker 任务轮次，供任务层读取。
         extras["worker_loop_seq"] = int(worker_loop_seq)
         # 回填到任务上下文。
         runtime_context.extras = extras
         # 读取当前 fb_delete_num 配置值用于日志展示。
         fb_delete_num = _read_fb_delete_num(runtime_context.config_map)
+        # 读取当前 vt_delete_num 配置值用于日志展示。
+        vt_delete_num = _read_vt_delete_num(runtime_context.config_map)
         # 记录本次执行轮次日志，便于定位“第几轮”相关逻辑。
-        log.info("任务即将执行", worker_loop_seq=worker_loop_seq, fb_delete_num=fb_delete_num)
+        log.info("任务即将执行", worker_loop_seq=worker_loop_seq, fb_delete_num=fb_delete_num, vt_delete_num=vt_delete_num)
         # 返回已注入轮次的上下文对象。
         return runtime_context
 
@@ -869,7 +1008,7 @@ def worker_main(
                     runtime_context = _attach_worker_loop_seq(runtime_context)
                     email_account = str(runtime_context.user_info.get("email_account", "")).strip()
                     try:
-                        imported_run_once(task_context=runtime_context)
+                        imported_task_run_once(task_context=runtime_context)
                         _emit(event_queue, serial, "running", f"手动执行 1 轮完成 | email={email_account or '-'}", email_account=email_account)
                         log.info(
                             "手动执行一轮任务完成",
@@ -939,7 +1078,7 @@ def worker_main(
             runtime_context = _attach_worker_loop_seq(runtime_context)
             email_account = str(runtime_context.user_info.get("email_account", "")).strip()
             try:
-                imported_run_once(task_context=runtime_context)
+                imported_task_run_once(task_context=runtime_context)
                 _emit(event_queue, serial, "running", f"自动执行 1 轮完成 | email={email_account or '-'}", email_account=email_account)
                 log.info(
                     "自动执行一轮任务完成",
@@ -999,15 +1138,47 @@ def worker_main(
     finally:
         # 退出前释放本设备占用账号：status=1 回退 0；status=2/3 保持不变，仅清空 device。
         try:
-            released = user_db.release_user_for_device(serial)
-            if released > 0:
-                log.info("worker 退出前已释放设备占用账号", serial=serial, released=released)
+            # 数据库连接可用时才执行账号释放，避免启动阶段失败时二次报错。
+            if user_db is not None:
+                # 释放本设备当前绑定账号。
+                released = user_db.release_user_for_device(serial)
+                if released > 0:
+                    log.info("worker 退出前已释放设备占用账号", serial=serial, released=released)
         except Exception as exc:
             log.exception("worker 退出释放设备占用账号失败", serial=serial, error=str(exc))
         try:
-            user_db.close()
+            # 数据库连接可用时才尝试关闭。
+            if user_db is not None:
+                # 关闭当前 worker 独立数据库连接。
+                user_db.close()
         except Exception:
             log.exception("worker 关闭 user_db 失败", serial=serial)
+        try:
+            # adb 路径可用时再执行辅助进程清理，避免解析失败时重复报错。
+            if helper_adb_bin:
+                # 清理当前设备遗留的本地辅助进程，避免 worker 退出后残留孤儿 helper。
+                helper_cleanup = cleanup_autovt_helper_processes(
+                    adb_bin=helper_adb_bin,
+                    log=log,
+                    serial=serial,
+                    orphan_only=False,
+                    reason="worker_finally_cleanup",
+                )
+                # 命中过辅助进程时记录一次摘要日志。
+                if int(helper_cleanup.get("matched", 0) or 0) > 0:
+                    # 把残留辅助进程清理结果写入日志，便于后续追踪。
+                    log.warning(
+                        "worker finally 已执行辅助进程清理",
+                        serial=serial,
+                        matched=int(helper_cleanup.get("matched", 0) or 0),
+                        terminated=int(helper_cleanup.get("terminated", 0) or 0),
+                        killed=int(helper_cleanup.get("killed", 0) or 0),
+                        failed=int(helper_cleanup.get("failed", 0) or 0),
+                        remaining=list(helper_cleanup.get("remaining", []) or []),
+                    )
+        except Exception as exc:
+            # finally 自清理失败时只记日志，不覆盖主退出流程。
+            log.exception("worker finally 清理辅助进程失败", serial=serial, error=str(exc))
 
         _emit(event_queue, serial, "stopped", "子进程已退出")
         log.info("worker 已退出")

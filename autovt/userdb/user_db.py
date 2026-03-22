@@ -42,10 +42,16 @@ VT_PWD_KEY = "vt_pwd"
 VT_PWD_DESC = "Vinted 全局密码配置（为空时表示不启用全局密码）"
 # 定义全局 vinted 密码默认值为空字符串（表示不启用全局密码）。
 VT_PWD_DEFAULT = ""
+# 定义 Vinted 删除控制配置 key 常量。
+VT_DELETE_NUM_KEY = "vt_delete_num"
+# 定义 Vinted 删除控制配置描述文案常量。
+VT_DELETE_NUM_DESC = "0 不删除，1 每次都重装，2 从第2次开始每次都重装，3 从第3次开始每次都重装"
+# 定义 Vinted 删除控制默认值为 0（仅清理，不重装）。
+VT_DELETE_NUM_DEFAULT = "0"
 # 定义 Facebook 删除控制配置 key 常量。
 FB_DELETE_NUM_KEY = "fb_delete_num"
 # 定义 Facebook 删除控制配置描述文案常量。
-FB_DELETE_NUM_DESC = "0 不删除，其他数字每隔第几次重装"
+FB_DELETE_NUM_DESC = "0 不删除，1 每次都重装，2 从第2次开始每次都重装，3 从第3次开始每次都重装"
 # 定义 Facebook 删除控制默认值为 0（仅清理，不重装）。
 FB_DELETE_NUM_DEFAULT = "0"
 # 定义设置页 Facebook 账号清理控制配置 key 常量。
@@ -434,6 +440,18 @@ class UserDB:
             (VT_PWD_KEY, vt_pwd_default_val, VT_PWD_DESC, now_ts()),
         # SQL 执行结束。
         )
+        # 计算并校验 Vinted 删除控制默认值。
+        vt_delete_default_val = self._normalize_config_value(VT_DELETE_NUM_KEY, VT_DELETE_NUM_DEFAULT)
+        # 插入 Vinted 删除控制默认配置（若 key 已存在则忽略）。
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {CONFIG_TABLE_NAME} ("key", "val", "desc", update_at)
+            VALUES (?, ?, ?, ?);
+            """,
+            # 默认配置参数。
+            (VT_DELETE_NUM_KEY, vt_delete_default_val, VT_DELETE_NUM_DESC, now_ts()),
+        # SQL 执行结束。
+        )
         # 计算并校验 Facebook 删除控制默认值。
         fb_delete_default_val = self._normalize_config_value(FB_DELETE_NUM_KEY, FB_DELETE_NUM_DEFAULT)
         # 插入 Facebook 删除控制默认配置（若 key 已存在则忽略）。
@@ -535,6 +553,26 @@ class UserDB:
                 raise ValueError("vt_pwd 长度不能超过 256 个字符")
             # 返回清理后的密码文本（可为空）。
             return raw_value
+        # 针对 Vinted 删除控制配置执行非负整数范围校验。
+        if key == VT_DELETE_NUM_KEY:
+            # 空值直接判定为非法。
+            if raw_value == "":
+                # 抛出明确错误提示。
+                raise ValueError("vt_delete_num 不能为空，需填写大于等于 0 的整数")
+            # 尝试把输入值解析为整数。
+            try:
+                # 转成整数做范围检查。
+                vt_delete_num = int(raw_value)
+            # 非整数输入直接报错。
+            except ValueError as exc:
+                # 抛出明确错误提示。
+                raise ValueError("vt_delete_num 必须是整数（0=仅清理，>0 为重装周期）") from exc
+            # 范围不在允许区间时判定为非法。
+            if not FB_DELETE_NUM_MIN <= vt_delete_num <= FB_DELETE_NUM_MAX:
+                # 抛出范围错误提示。
+                raise ValueError(f"vt_delete_num 超出范围，必须在 {FB_DELETE_NUM_MIN} 到 {FB_DELETE_NUM_MAX} 之间")
+            # 返回标准化后的整数文本。
+            return str(vt_delete_num)
         # 针对 Facebook 删除控制配置执行非负整数范围校验。
         if key == FB_DELETE_NUM_KEY:
             # 空值直接判定为非法。
@@ -904,12 +942,21 @@ class UserDB:
         # 把 sqlite3.Row 转字典后返回。
         return dict(row)
 
-    # 定义“按设备领取一条可用账号（status=0）”方法（事务加锁防并发冲突）。
-    def claim_user_for_device(self, device: str) -> dict[str, Any] | None:
+    # 定义允许参与账号领取筛选的小状态字段集合。
+    CLAIMABLE_REGISTER_STATUS_FIELDS = {"fb_status", "vinted_status", "titok_status"}
+
+    # 定义“按设备领取一条可用账号（status=0 且当前模式小状态=0）”方法（事务加锁防并发冲突）。
+    def claim_user_for_device(self, device: str, status_field: str) -> dict[str, Any] | None:
         # 获取可用连接。
         conn = self.connect()
         # 校验并标准化设备 serial。
         safe_device = self._normalize_required_text("device", device)
+        # 标准化当前注册方式对应的小状态字段名。
+        safe_status_field = str(status_field or "").strip()
+        # 仅允许预设的小状态字段名参与动态 SQL，避免误传非法列名。
+        if safe_status_field not in self.CLAIMABLE_REGISTER_STATUS_FIELDS:
+            # 直接抛出可读错误，便于上层快速定位参数问题。
+            raise ValueError(f"不支持的状态字段: {safe_status_field or '-'}")
         # 获取当前时间戳，供 update_at 写入。
         ts_now = now_ts()
         # 使用显式事务，确保“查询+更新”原子化。
@@ -941,11 +988,11 @@ class UserDB:
             # SQL 执行结束。
             )
 
-            # 从可用池里找一条“未使用且未绑定设备”的账号。
+            # 从可用池里找一条“未使用、未绑定设备且当前模式未注册”的账号。
             candidate_row = conn.execute(
                 f"""
                 SELECT * FROM {TABLE_NAME}
-                WHERE status = 0 AND (device = '' OR device IS NULL)
+                WHERE status = 0 AND {safe_status_field} = 0 AND (device = '' OR device IS NULL)
                 ORDER BY id ASC
                 LIMIT 1;
                 """,
@@ -964,7 +1011,7 @@ class UserDB:
                 f"""
                 UPDATE {TABLE_NAME}
                 SET status = 1, device = ?, update_at = ?
-                WHERE id = ? AND status = 0 AND (device = '' OR device IS NULL);
+                WHERE id = ? AND status = 0 AND {safe_status_field} = 0 AND (device = '' OR device IS NULL);
                 """,
                 # 传入设备 serial、更新时间和候选 id。
                 (safe_device, int(ts_now), candidate_id),
@@ -1670,6 +1717,10 @@ class UserDB:
             elif key_value == VT_PWD_KEY:
                 # 采用默认描述文案。
                 desc_value = VT_PWD_DESC
+            # Vinted 删除控制配置使用固定默认描述。
+            elif key_value == VT_DELETE_NUM_KEY:
+                # 采用默认描述文案。
+                desc_value = VT_DELETE_NUM_DESC
             # Facebook 删除控制配置使用固定默认描述。
             elif key_value == FB_DELETE_NUM_KEY:
                 # 采用默认描述文案。
@@ -1706,13 +1757,14 @@ class UserDB:
             # SQL 执行结束。
             )
 
-    # 定义按邮箱更新 status/fb_status（可选更新备注和失败累计次数）方法。
+    # 定义按邮箱更新状态字段（可选更新 fb_status、vinted_status、备注和失败累计次数）方法。
     def update_status(
         self,
         email_account: str,
         status: int,
         msg: str | None = None,
         fb_status: int | None = None,
+        vinted_status: int | None = None,
         increment_fb_fail_num: bool = False,
     ) -> int:
         # 获取可用连接。
@@ -1743,6 +1795,12 @@ class UserDB:
             set_parts.append("fb_status = ?")
             # 追加 Facebook 状态参数。
             params.append(int(fb_status))
+        # 需要更新 vinted_status 时追加对应 SQL 子句。
+        if vinted_status is not None:
+            # 追加 Vinted 状态字段更新子句。
+            set_parts.append("vinted_status = ?")
+            # 追加 Vinted 状态参数。
+            params.append(int(vinted_status))
         # 需要更新备注时追加对应 SQL 子句。
         if safe_msg is not None:
             # 追加备注字段更新子句。
@@ -1765,7 +1823,7 @@ class UserDB:
         with conn:
             # 执行动态拼接后的更新 SQL。
             cursor = conn.execute(
-                # 使用动态 SQL 支持备注、fb_status、失败次数累加的任意组合。
+                # 使用动态 SQL 支持备注、fb_status、vinted_status、失败次数累加的任意组合。
                 sql,
                 # 传入与动态 SQL 对应的参数列表。
                 tuple(params),

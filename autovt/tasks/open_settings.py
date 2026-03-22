@@ -63,6 +63,8 @@ from autovt.userdb.user_db import PROXYIP_START_NUM_DEFAULT
 from autovt.userdb.user_db import PROXYIP_START_NUM_KEY
 from autovt.userdb.user_db import SETTING_FB_DEL_NUM_DEFAULT
 from autovt.userdb.user_db import SETTING_FB_DEL_NUM_KEY
+from autovt.userdb.user_db import VT_DELETE_NUM_DEFAULT
+from autovt.userdb.user_db import VT_DELETE_NUM_KEY
 from autovt.userdb.user_db import UserDB
 from autovt.desc import  *
 import json
@@ -97,6 +99,8 @@ class OpenSettingsTask:
         self.config_map = {str(k): str(v) for k, v in dict(self.task_context.config_map or {}).items()}
         # 读取当前 worker 子进程任务轮次（由 worker 在每次 run_once 前注入）。
         self.worker_loop_seq = self._read_worker_loop_seq()
+        # 读取当前 worker 透传下来的注册方式，默认回退为 facebook。
+        self.register_mode = self._read_register_mode()
         # 缓存当前账号邮箱，便于日志追踪。
         self.user_email = str(self.user_info.get("email_account", "")).strip()
         # 缓存 first_name，供 Facebook 表单输入。
@@ -123,6 +127,7 @@ class OpenSettingsTask:
         self.settings_package = "com.android.settings"
         # 代理
         self.nekobox_package = "moe.nb4a"
+        # vinted
         # 保存“清理按钮”资源 ID。
         self.mojiwang_wipe_button_id = "com.yztc.studio.plugin:id/wipedev_btn_wipe"
         # 保存“任务结束提示”资源 ID。
@@ -133,6 +138,8 @@ class OpenSettingsTask:
         self.mojiwang_loop_count = self._read_mojiwang_loop_count()
         # 从 t_config 读取 Facebook 删除控制（0=不删除，1=第2轮删除一次）。
         self.fb_delete_num = self._read_fb_delete_num()
+        # 从 t_config 读取 Vinted 删除控制（0=不删除，>0=按周期重装）。
+        self.vt_delete_num = self._read_vt_delete_num()
         # 从 t_config 读取设置页 Facebook 账号清理控制（0=不清理，>0=按周期清理）。
         self.setting_fb_del_num = self._read_setting_fb_del_num()
         # 从 t_config 读取代理开始位置配置（1~5）。
@@ -145,6 +152,10 @@ class OpenSettingsTask:
         self.mojiwang_wait_timeout_sec = 5.0
         # 创建用户数据库对象，供注册成功/失败后统一更新状态。
         self.user_db = UserDB()
+        # 初始化通用失败原因缓存，供不同注册任务复用。
+        self.task_result_reason = ""
+        # 初始化通用失败状态码，默认普通失败写入 status=3。
+        self.task_result_status = 3
         # 初始化 Facebook 失败原因缓存，失败时会写入 t_user.msg。
         self.facebook_error_reason = ""
         # 初始化 Facebook 失败状态码，默认普通失败写入 status=3。
@@ -194,6 +205,19 @@ class OpenSettingsTask:
         # 返回合法轮次。
         return parsed_value
 
+    # 定义“读取注册方式”的方法。
+    def _read_register_mode(self) -> str:
+        # 从 task_context.extras 读取 worker 透传的注册方式。
+        raw_value = str((self.task_context.extras or {}).get("register_mode", "facebook")).strip().lower()
+        # 非法值时回退到 facebook，避免旧调用链直接报错。
+        if raw_value not in {"facebook", "vinted"}:
+            # 记录告警日志，便于排查启动链路是否正确传值。
+            self.log.warning("注册方式缺失或非法，已回退为 facebook", register_mode=raw_value)
+            # 返回默认注册方式。
+            return "facebook"
+        # 返回合法注册方式。
+        return raw_value
+
     # 定义“读取 Facebook 重装周期配置”的方法。
     def _read_fb_delete_num(self) -> int:
         # 从配置映射读取 fb_delete_num，缺失时回退 0。
@@ -206,6 +230,29 @@ class OpenSettingsTask:
         except Exception:
             # 返回默认值 0。
             return 0
+        # 小于最小值时回退到最小值。
+        if parsed_value < FB_DELETE_NUM_MIN:
+            # 返回最小值。
+            return FB_DELETE_NUM_MIN
+        # 大于最大值时截断到最大值。
+        if parsed_value > FB_DELETE_NUM_MAX:
+            # 返回最大值。
+            return FB_DELETE_NUM_MAX
+        # 返回合法配置值。
+        return parsed_value
+
+    # 定义“读取 Vinted 重装周期配置”的方法。
+    def _read_vt_delete_num(self) -> int:
+        # 从配置映射读取 vt_delete_num，缺失时回退默认值 0。
+        raw_value = str(self.config_map.get(VT_DELETE_NUM_KEY, VT_DELETE_NUM_DEFAULT)).strip()
+        # 尝试解析整数。
+        try:
+            # 转成整数后统一做边界保护。
+            parsed_value = int(raw_value)
+        # 非法值时回退默认值 0。
+        except Exception:
+            # 返回默认值 0。
+            return int(VT_DELETE_NUM_DEFAULT)
         # 小于最小值时回退到最小值。
         if parsed_value < FB_DELETE_NUM_MIN:
             # 返回最小值。
@@ -349,8 +396,21 @@ class OpenSettingsTask:
         if self.worker_loop_seq <= 0:
             # 返回 False 表示不重装。
             return False
-        # 只有“循环次数 % fb_delete_num == 0”时才执行重装。
-        return (self.worker_loop_seq % self.fb_delete_num) == 0
+        # 达到配置指定轮次后，每轮都执行重装。
+        return self.worker_loop_seq >= self.fb_delete_num
+
+    # 定义“判断本轮是否需要执行 Vinted 重装”的方法。
+    def _should_delete_vt_this_loop(self) -> bool:
+        # 配置为 0 时不执行重装。
+        if self.vt_delete_num <= 0:
+            # 返回 False 表示不重装。
+            return False
+        # 当前轮次无效时不执行重装。
+        if self.worker_loop_seq <= 0:
+            # 返回 False 表示不重装。
+            return False
+        # 达到配置指定轮次后，每轮都执行重装。
+        return self.worker_loop_seq >= self.vt_delete_num
 
     # 定义“判断本轮是否需要执行设置页 Facebook 账号清理”的方法。
     def _should_delete_setting_fb_this_loop(self) -> bool:
@@ -395,6 +455,39 @@ class OpenSettingsTask:
         # 全部候选都不存在时抛出明确错误，便于排查。
         raise FileNotFoundError(
             "未找到 facebook.apk（期望外置在可执行文件同级 apks 目录），候选路径："
+            + " / ".join(str(path) for path in candidates)
+        )
+
+    # 定义“解析 Vinted 安装包路径”的方法。
+    def _resolve_vinted_apk_path(self) -> Path:
+        # 保存候选路径列表，按优先级依次尝试。
+        candidates: list[Path] = []
+        # 读取当前可执行文件所在目录（源码运行/打包运行都可用）。
+        exe_dir = Path(sys.executable).resolve().parent
+        # 候选 1：可执行文件同级目录下的 apks/vinted.apk。
+        candidates.append(exe_dir / "apks" / "vinted.apk")
+        # 候选 2：可执行文件上一级目录下的 apks/vinted.apk。
+        candidates.append(exe_dir.parent / "apks" / "vinted.apk")
+        # 候选 3：macOS .app 场景下，app 包外层目录同级 apks/vinted.apk。
+        try:
+            # 尝试追加 .app 外层候选路径。
+            candidates.append(exe_dir.parents[2] / "apks" / "vinted.apk")
+        # 非 .app 目录结构时忽略该候选。
+        except Exception:
+            # 不中断流程，继续尝试其他候选路径。
+            pass
+        # 候选 4：当前工作目录下的 apks/vinted.apk。
+        candidates.append(Path.cwd() / "apks" / "vinted.apk")
+        # 候选 5：源码项目根目录下的 apks/vinted.apk。
+        candidates.append(Path(__file__).resolve().parents[2] / "apks" / "vinted.apk")
+        # 逐个候选检查文件是否存在。
+        for candidate in candidates:
+            # 命中存在且是文件时直接返回。
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        # 全部候选都不存在时抛出明确错误，便于排查。
+        raise FileNotFoundError(
+            "未找到 vinted.apk（期望外置在可执行文件同级 apks 目录），候选路径："
             + " / ".join(str(path) for path in candidates)
         )
 
@@ -633,6 +726,49 @@ class OpenSettingsTask:
         if installed is False:
             # 记录安装后校验失败日志。
             self.log.error("安装 Facebook 后校验失败：包不存在", package=self.facebook_package, apk_path=str(apk_path))
+            # 返回 False 表示安装失败。
+            return False
+        # 返回 True 表示安装成功或状态未知但已执行安装命令。
+        return True
+
+    # 定义“安全安装 Vinted”的方法。
+    def _safe_install_vinted_apk(self) -> bool:
+        # 先解析 vinted.apk 外置路径。
+        try:
+            # 获取安装包绝对路径。
+            apk_path = self._resolve_vinted_apk_path()
+        # 路径解析失败时记录错误并返回失败。
+        except Exception as exc:
+            # 记录找包失败日志。
+            self.log.error("安装 Vinted 失败：未找到安装包", error=str(exc))
+            # 返回 False 表示安装失败。
+            return False
+        # 尝试执行安装动作。
+        try:
+            # 使用 -r 覆盖安装，-d 允许降级安装。
+            install(str(apk_path), install_options=["-r", "-d"])
+            # 记录安装成功日志。
+            self.log.info("已安装 Vinted 应用", package=self.vinted_package, apk_path=str(apk_path))
+        # 捕获安装异常并做安全处理。
+        except Exception as exc:
+            # 连接异常继续抛出，让 worker 触发重建运行时。
+            if self._is_poco_disconnect_error(exc):
+                # 标记当前轮检测到连接异常。
+                self._runtime_disconnect_detected = True
+                # 记录连接异常日志。
+                self.log.warning("安装 Vinted 遇到连接异常，准备抛出触发重建", error=str(exc), apk_path=str(apk_path))
+                # 抛出异常给上层处理。
+                raise
+            # 非连接异常记录告警并返回失败。
+            self.log.warning("安装 Vinted 失败，按可恢复异常继续", error=str(exc), apk_path=str(apk_path))
+            # 返回 False 表示安装失败。
+            return False
+        # 安装完成后再次校验是否真的已安装。
+        installed = self._is_package_installed(self.vinted_package)
+        # 明确未安装时按失败处理并记录日志。
+        if installed is False:
+            # 记录安装后校验失败日志。
+            self.log.error("安装 Vinted 后校验失败：包不存在", package=self.vinted_package, apk_path=str(apk_path))
             # 返回 False 表示安装失败。
             return False
         # 返回 True 表示安装成功或状态未知但已执行安装命令。
@@ -1176,21 +1312,54 @@ class OpenSettingsTask:
             # 安全停止系统设置应用。
             self._safe_stop_app(self.settings_package)
 
-    def clear_all(self) -> None:
-        # 这个方法目前没用到，但保留作为“如果需要在循环外做一次性清理”的预留。
+    def _run_vinted_cleanup_flow(self) -> None:
+        # 执行 Vinted 独立应用清理，保证只处理 Vinted 包数据。
         # 停止业务应用，确保可执行清理数据。
         self._safe_stop_app(self.vinted_package)
         sleep(0.5)
         # 清理业务应用数据，确保环境干净。
         self._safe_clear_app(self.vinted_package)
-        # 先停止插件应用，避免脏状态残留。
-        self._safe_stop_app(self.mojiwang_packge)
-        #
+        # 命中“达到 vt_delete_num 指定轮次后每轮重装”条件时再执行重装。
+        if self._should_delete_vt_this_loop():
+            # 记录命中删除条件日志。
+            self.log.info(
+                "命中 Vinted 重装条件，执行 uninstall + install",
+                vt_delete_num=self.vt_delete_num,
+                worker_loop_seq=self.worker_loop_seq,
+            )
+            # 再卸载 Vinted 应用（未安装时会自动跳过）。
+            uninstall_ok = self._safe_uninstall_app(self.vinted_package)
+            # 卸载后重新安装 Vinted。
+            install_ok = self._safe_install_vinted_apk()
+            # 重装失败时记录错误日志，方便排查后续流程失败原因。
+            if not install_ok:
+                self.log.error(
+                    "Vinted 删除后重装失败，后续流程可能受影响",
+                    vt_delete_num=self.vt_delete_num,
+                    worker_loop_seq=self.worker_loop_seq,
+                    uninstall_ok=uninstall_ok,
+                )
+                # 主动抛出可读错误，让 run_once 按失败回写并中断本轮后续流程。
+                raise RuntimeError("Vinted 删除后重装失败，请检查 apks/vinted.apk 或设备安装权限")
+        # 未命中重装条件时，保留本轮仅清理流程。
+        else:
+            # 记录跳过重装日志，便于核对配置是否生效。
+            self.log.info(
+                "未命中 Vinted 重装条件，本轮仅清理不重装",
+                vt_delete_num=self.vt_delete_num,
+                worker_loop_seq=self.worker_loop_seq,
+            )
+        # 记录 Vinted 清理完成，便于核对当前任务只处理本包。
+        self.log.info("Vinted 应用清理完成", register_mode=self.register_mode, user_email=self.user_email, package=self.vinted_package)
+
+    # 定义“执行 Facebook 专属清理流程”的方法。
+    def _run_facebook_cleanup_flow(self) -> None:
+        # 先停止 Facebook 应用，避免脏状态残留。
         self._safe_stop_app(self.facebook_package)
         sleep(0.5)
         # 每轮都先清理 Facebook 数据。
         self._safe_clear_app(self.facebook_package)
-        # 命中“循环次数 % fb_delete_num == 0”条件时再执行重装。
+        # 命中“达到 fb_delete_num 指定轮次后每轮重装”条件时再执行重装。
         if self._should_delete_fb_this_loop():
             # 记录命中删除条件日志。
             self.log.info(
@@ -1247,6 +1416,15 @@ class OpenSettingsTask:
                 setting_fb_del_num=self.setting_fb_del_num,
                 worker_loop_seq=self.worker_loop_seq,
             )
+
+    # 定义“执行共享设备准备流程”的方法。
+    def _run_shared_device_prepare_flow(self) -> None:
+        # 先停止抹机王应用，避免脏状态残留影响新一轮流程。
+        self._safe_stop_app(self.mojiwang_packge)
+        # 执行抹机王完整循环动作。
+        self.mojiwang_run_all()
+        # 执行代理流程（根据配置范围安全随机选择代理模式）。
+        self.nekobox_run_all()
 
     # 定义“等待节点可点击并点击”的通用方法。
     def _wait_and_click_node(self, node: Any, desc: str) -> bool:
@@ -1914,29 +2092,47 @@ class OpenSettingsTask:
             # 返回 False 表示按键失败。
             return False
 
-    # 定义“清空 Facebook 失败原因缓存”的方法。
-    def _reset_facebook_error_reason(self) -> None:
-        # 把失败原因重置为空字符串，避免串到下一轮任务。
+    # 定义“清空通用任务结果缓存”的方法。
+    def _reset_task_result_state(self) -> None:
+        # 把通用失败原因重置为空字符串，避免串到下一轮任务。
+        self.task_result_reason = ""
+        # 把通用失败状态码重置为普通失败状态，避免串到下一轮任务。
+        self.task_result_status = 3
+        # 同步重置 Facebook 失败原因缓存，保持旧逻辑兼容。
         self.facebook_error_reason = ""
-        # 把失败状态码重置为普通失败状态，避免串到下一轮任务。
+        # 同步重置 Facebook 失败状态码，保持旧逻辑兼容。
         self.facebook_error_status = 3
 
-    # 定义“记录 Facebook 失败原因并返回 False”的方法。
-    def _facebook_fail(self, reason: str, target_status: int = 3) -> bool:
+    # 定义“清空 Facebook 失败原因缓存”的方法。
+    def _reset_facebook_error_reason(self) -> None:
+        # 复用通用任务结果重置逻辑，保持字段状态一致。
+        self._reset_task_result_state()
+
+    # 定义“记录通用任务失败原因”的方法。
+    def _set_task_result_failure(self, reason: str, target_status: int = 3) -> None:
         # 标准化失败原因字符串，避免空值落库不可读。
         safe_reason = str(reason or "").strip()
         # 当调用方传空原因时，回退统一文案。
         if safe_reason == "":
             # 使用兜底错误文案。
-            safe_reason = "Facebook 注册失败：未知原因"
-        # 保存失败原因，供 run_once 统一写入 t_user.msg。
+            safe_reason = "任务执行失败：未知原因"
+        # 保存通用失败原因，供子类和收尾逻辑复用。
+        self.task_result_reason = safe_reason
+        # 保存通用失败状态码，供收尾阶段统一回写。
+        self.task_result_status = int(target_status)
+        # 同步写回 Facebook 兼容字段，避免旧逻辑丢值。
         self.facebook_error_reason = safe_reason
-        # 保存失败状态码，供 run_once 收尾阶段统一回写到 t_user.status。
+        # 同步写回 Facebook 兼容状态码。
         self.facebook_error_status = int(target_status)
+
+    # 定义“记录 Facebook 失败原因并返回 False”的方法。
+    def _facebook_fail(self, reason: str, target_status: int = 3) -> bool:
+        # 先保存通用失败结果，供基类和子类共用。
+        self._set_task_result_failure(reason=reason or "Facebook 注册失败：未知原因", target_status=target_status)
         # 记录错误日志，确保失败链路可追踪。
         self.log.error(
             "Facebook 注册流程失败",
-            reason=safe_reason,
+            reason=self.facebook_error_reason,
             target_status=self.facebook_error_status,
             user_email=self.user_email,
         )
@@ -1958,45 +2154,72 @@ class OpenSettingsTask:
         # 控制 msg 长度，避免异常文本过长影响列表查看。
         return base_message[:300]
 
-    # 定义“回写 Facebook 结果到 t_user”的方法。
-    def _update_fb_result_to_db(self, success: bool, reason: str = "") -> None:
+    # 定义“通用回写任务结果到 t_user”的方法。
+    def _update_result_to_db(
+        self,
+        *,
+        success: bool,
+        reason: str = "",
+        status_field: str,
+        success_status_value: int = 1,
+        failure_status_value: int = 0,
+        increment_fb_fail_num: bool = False,
+        log_label: str = "任务",
+    ) -> None:
         # 邮箱为空时无法按账号更新，直接记录错误并返回。
         if self.user_email == "":
             # 记录无法更新的根因。
-            self.log.error("更新 t_user 失败：email_account 为空", success=success)
+            self.log.error("更新 t_user 失败：email_account 为空", success=success, log_label=log_label)
             # 直接返回，避免无意义 SQL。
             return
         # 成功时账号状态写 2（已完成），失败时使用流程内记录的失败状态码。
-        target_status = 2 if success else int(self.facebook_error_status)
-        # 成功时 Facebook 状态写 1，失败写 0。
-        target_fb_status = 1 if success else 0
-        # 失败时累加 Facebook 失败次数，成功时不清零。
-        should_increment_fb_fail_num = not bool(success)
+        target_status = 2 if success else int(self.task_result_status)
+        # 根据调用方传入的状态字段值构造目标注册状态。
+        target_register_status = int(success_status_value if success else failure_status_value)
+        # 失败且调用方要求时才累加 Facebook 失败次数。
+        should_increment_fb_fail_num = bool((not success) and increment_fb_fail_num)
         # 成功时清空 msg，失败时写入具体错误原因。
-        target_msg = "" if success else str(reason or "Facebook 注册失败：未知原因").strip()
+        target_msg = "" if success else str(reason or f"{log_label}失败：未知原因").strip()
         # 控制 msg 长度，避免写入过长异常字符串。
         target_msg = target_msg[:300]
+        # 初始化动态更新参数字典。
+        update_kwargs: dict[str, Any] = {}
+        # Facebook 路径写入 fb_status 字段。
+        if status_field == "fb_status":
+            # 写入 Facebook 注册状态。
+            update_kwargs["fb_status"] = target_register_status
+        # Vinted 路径写入 vinted_status 字段。
+        elif status_field == "vinted_status":
+            # 写入 Vinted 注册状态。
+            update_kwargs["vinted_status"] = target_register_status
+        # 未知字段直接记录错误并返回，避免误更新。
+        else:
+            # 记录非法字段错误。
+            self.log.error("回写任务结果失败：状态字段非法", status_field=status_field, log_label=log_label)
+            # 直接返回，避免执行错误 SQL。
+            return
         # 使用异常保护数据库更新，确保任务流程不崩溃。
         try:
-            # 执行按邮箱更新状态（status/fb_status/msg）。
+            # 执行按邮箱更新状态（status/注册状态/msg）。
             affected_rows = self.user_db.update_status(
                 # 目标邮箱账号。
                 email_account=self.user_email,
                 # 目标账号状态。
                 status=target_status,
-                # 目标 Facebook 注册状态。
-                fb_status=target_fb_status,
                 # 目标备注信息。
                 msg=target_msg,
                 # 失败时原子累加 Facebook 失败次数，成功时保持原值。
                 increment_fb_fail_num=should_increment_fb_fail_num,
+                # 透传当前任务对应的注册状态字段更新参数。
+                **update_kwargs,
             )
             # 记录落库结果，便于后续排查是否命中记录。
             self.log.info(
-                "Facebook 结果已回写 t_user",
+                f"{log_label}结果已回写 t_user",
                 email_account=self.user_email,
                 status=target_status,
-                fb_status=target_fb_status,
+                status_field=status_field,
+                register_status=target_register_status,
                 increment_fb_fail_num=should_increment_fb_fail_num,
                 msg=target_msg,
                 affected_rows=affected_rows,
@@ -2005,14 +2228,28 @@ class OpenSettingsTask:
         except Exception as exc:
             # 记录完整异常栈，便于定位 DB 层问题。
             self.log.exception(
-                "回写 Facebook 结果到 t_user 失败",
+                f"回写{log_label}结果到 t_user 失败",
                 email_account=self.user_email,
                 status=target_status,
-                fb_status=target_fb_status,
+                status_field=status_field,
+                register_status=target_register_status,
                 increment_fb_fail_num=should_increment_fb_fail_num,
                 msg=target_msg,
                 error=str(exc),
             )
+
+    # 定义“回写 Facebook 结果到 t_user”的方法。
+    def _update_fb_result_to_db(self, success: bool, reason: str = "") -> None:
+        # 复用通用回写逻辑，保持 Facebook 原有状态语义不变。
+        self._update_result_to_db(
+            success=success,
+            reason=reason,
+            status_field="fb_status",
+            success_status_value=1,
+            failure_status_value=2,
+            increment_fb_fail_num=True,
+            log_label="Facebook",
+        )
 
     # 定义“按轮询查找并点击”的通用方法，支持传入 Poco 节点列表。
     def poco_find_or_click(
@@ -3236,10 +3473,37 @@ class OpenSettingsTask:
         self.log.info("Facebook 头像重新上传流程完成")
         return True
 
+    # 定义“执行任务前公共准备流程”的方法。
+    def _run_common_setup_flow(self) -> None:
+        # 获取并校验当前 worker 进程初始化好的 Poco 实例。
+        self._require_poco()
+        # 记录当前任务感知到的上下文信息。
+        self.log.info(
+            "任务开始",
+            serial=self.device_serial,
+            device_locale=self.device_locale,
+            device_lang=self.device_lang,
+            email_account=self.user_email,
+            register_mode=self.register_mode,
+            mojiwang_run_num=self.mojiwang_loop_count,
+            fb_delete_num=self.fb_delete_num,
+            vt_delete_num=self.vt_delete_num,
+            setting_fb_del_num=self.setting_fb_del_num,
+            worker_loop_seq=self.worker_loop_seq,
+        )
+        # 唤醒设备屏幕，避免黑屏导致后续操作失败。
+        wake()
+        # 回到系统桌面，保证任务从一致状态开始。
+        home()
+        # 记录回桌面动作完成。
+        self.log.info("已回到桌面")
+        # 记录共享前置阶段完成，应用数据清理由任务自身独立处理。
+        self.log.info("共享前置流程完成，等待执行注册方式对应的应用清理", register_mode=self.register_mode)
+
     # 定义“执行一轮完整任务”的公开方法。
     def run_once(self) -> None:
-        # 重置本轮 Facebook 失败原因缓存。
-        self._reset_facebook_error_reason()
+        # 重置本轮任务结果缓存，避免串到下一轮任务。
+        self._reset_task_result_state()
         # 重置本轮设备连接异常标记，避免串到下一轮任务。
         self._runtime_disconnect_detected = False
         # 初始化 Facebook 成功标记，默认失败。
@@ -3250,32 +3514,12 @@ class OpenSettingsTask:
         reraised_exc: Exception | None = None
         # 使用异常保护整轮任务，避免异常导致进程崩溃。
         try:
-            # 获取并校验当前 worker 进程初始化好的 Poco 实例。
-            self._require_poco()
-            # 记录当前任务感知到的上下文信息。
-            self.log.info(
-                "任务开始",
-                serial=self.device_serial,
-                device_locale=self.device_locale,
-                device_lang=self.device_lang,
-                email_account=self.user_email,
-                mojiwang_run_num=self.mojiwang_loop_count,
-                fb_delete_num=self.fb_delete_num,
-                setting_fb_del_num=self.setting_fb_del_num,
-                worker_loop_seq=self.worker_loop_seq,
-            )
-            # 唤醒设备屏幕，避免黑屏导致后续操作失败。
-            wake()
-            # 回到系统桌面，保证任务从一致状态开始。
-            home()
-            # 记录回桌面动作完成。
-            self.log.info("已回到桌面")
-            # 执行预清理步骤（Vinted 固定清理，Facebook 按 fb_delete_num 条件清理）。
-            self.clear_all()
-            # 执行抹机王完整循环动作。
-            self.mojiwang_run_all()
-            # 执行代理流程（根据配置范围安全随机选择代理模式）。
-            self.nekobox_run_all()
+            # 执行所有任务共用的前置准备流程。
+            self._run_common_setup_flow()
+            # 执行 Facebook 独立应用清理，避免误清理 Vinted 包。
+            self._run_facebook_cleanup_flow()
+            # 执行共享设备准备流程（抹机王 + 代理）。
+            self._run_shared_device_prepare_flow()
             # 执行 Facebook 全流程，并返回是否成功完成。
             facebook_ok = self.facebook_run_all()
         # 捕获所有异常并转换为可落库的失败原因。
@@ -3283,7 +3527,7 @@ class OpenSettingsTask:
             # 记录完整异常日志，便于排查真实堆栈。
             self.log.exception("run_once 执行异常", error=str(exc))
             # 生成具体失败原因文本，供写入 t_user.msg。
-            self.facebook_error_reason = self._build_failure_msg(exc, prefix="run_once 异常")
+            self._set_task_result_failure(reason=self._build_failure_msg(exc, prefix="run_once 异常"), target_status=self.task_result_status)
             # 标记本轮 Facebook 结果为失败。
             facebook_ok = False
             # 连接类异常让 worker 触发 reinit_runtime，避免任务层吞错后带病继续。
@@ -3302,7 +3546,7 @@ class OpenSettingsTask:
             if facebook_ok:
                 # 回写成功状态并清空 msg。
                 self._update_fb_result_to_db(success=True, reason="")
-            # Facebook 失败时写入 status=3/4, fb_status=0, msg=具体错误原因。
+            # Facebook 失败时写入 status=3/4, fb_status=2, msg=具体错误原因。
             else:
                 # 设备连接异常场景下，不把账号打成失败状态，避免误判账号问题。
                 if self._runtime_disconnect_detected:
@@ -3310,12 +3554,12 @@ class OpenSettingsTask:
                     self.log.warning(
                         "检测到设备连接异常，跳过账号失败状态回写",
                         user_email=self.user_email,
-                        reason=str(self.facebook_error_reason or "").strip(),
+                        reason=str(self.task_result_reason or "").strip(),
                     )
                 # 非连接异常仍按原逻辑写入失败状态。
                 else:
                     # 组装最终失败原因（优先使用流程内记录的具体原因）。
-                    final_reason = str(self.facebook_error_reason or "").strip()
+                    final_reason = str(self.task_result_reason or "").strip()
                     # 失败原因为空时给出统一兜底文案。
                     if final_reason == "":
                         # 使用兜底失败原因，避免 msg 为空。

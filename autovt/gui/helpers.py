@@ -24,10 +24,14 @@ STATUS_23_RETRY_MAX_DESC = "账号 status=2/3 时同账号重试次数: 0=不重
 VT_PWD_KEY = "vt_pwd"
 # 定义全局 vinted 密码配置描述文案。
 VT_PWD_DESC = "Vinted 全局密码配置（为空时表示不启用全局密码）"
+# 定义 Vinted 删除控制配置 key。
+VT_DELETE_NUM_KEY = "vt_delete_num"
+# 定义 Vinted 删除控制描述文案。
+VT_DELETE_NUM_DESC = "0 不删除，1 每次都重装，2 从第2次开始每次都重装，， vinted.apk 重装"
 # 定义 Facebook 删除控制配置 key。
 FB_DELETE_NUM_KEY = "fb_delete_num"
 # 定义 Facebook 删除控制描述文案。
-FB_DELETE_NUM_DESC = "0 不删除，其他数字每隔第几次重装"
+FB_DELETE_NUM_DESC = "0 不删除，1 每次都重装，2 从第2次开始每次都重装，, facebook.apk 重装"
 # 定义设置页 Facebook 账号清理控制配置 key。
 SETTING_FB_DEL_NUM_KEY = "setting_fb_del_num"
 # 定义设置页 Facebook 账号清理控制描述文案。
