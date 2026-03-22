@@ -27,11 +27,11 @@ def main() -> None:
         # 传入微软 OAuth client_id。
         client_id="9e5f94bc-e8a4-4e73-b8be-63364c29d753",
         # 传入目标邮箱账号。
-        email_name="StaceyGreenfeldersntgu@outlook.com",
+        email_name="hanshanguan1984@outlook.de",
         # 传入 refresh_token 用于刷新 access_token。
-        refresh_token="M.C513_SN1.0.U.-CgrokmZGmk*eRyA34uTGVZlHbzdhNRnKZiRmuH9F*13UgF3iy*5iD2!p5sNdfWAdTT0ESa!362nWvqS33PoX2Lfxw6O7Bm4DfED2VmMIki9K2GPNTK3HZGOF2hlDddlX69OhlUPIq3sLhc6ktexoIA5VDf1vTzN688HHSeYsvtI6OpS*3uGSxowEG0CDYFOXxZL89s!c3!Ha*K2INzpe4XDbpos8SxIXJOxoE52ojReTaeImq4TrSG7gbNQz!981GIEa9B*7twnNdyBJhXtzIfIRTDq8uJb6g4umxBFGAW2QsfDKxX6CFgsgIT4FuLX9hryjPZkeVX3*y8vGikQAQSiNc8J4OB*pM227ZNhChNWMWLMYeOD82zkipLMg3d11uCEdcJYNhdTyuhFVkxFIjQPREorUv5U6e4TKDwK4MX7ofyV!ZT6pAem0oKpgY*Nqwg$$",
+        refresh_token="M.C527_BL2.0.U.-CqE!7K4DWrcuD2cT7v!D25bPCrhFjYHnw*S8ZXqoDEd5utHHfBAwXHVToOXC7BlUyTsfl9x4syN6JNYVnWLfDUdA0eCpsS8tjpNgB1QoS13xT*8qs8!ISStTXWPdoPtQKTx0H62toBxqccyDWYpHqx2iXthBexNb25azs*Kaeb08HmBwKOaZmktF43l!iv8NyqlVMvOg*oJEbRtMcusiQajuUB2XFR4xc*BH41HjgKQ1dcu6nE4q565KH*bR89aviBNRuqeBWT2VzJvmfiK!Ij0aoWyRShMpJWrFVI1iOOo4aHqemvRps9nUbqrvwzeuqRZwpzki8zOGsO9oCe2FRYx*IP50cF2Vppo0OgIVhp*o",
         # 关闭调试落盘（需要调试时改为 True）。
-        is_debug=False,
+        is_debug=True,
     )
     # 打印结果状态与内容，便于终端直接查看。
     print("ok=", ok, "result=", result)

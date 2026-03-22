@@ -103,6 +103,8 @@ def _get_mail_code_by_parser(
         return False, f"刷新 access_token 异常: {exc}"
     # 统一解析刷新结果结构。
     token_ok, token_payload = _normalize_bool_payload(token_result, "刷新 access_token")
+    # 尝试读取 get_access_token 返回的 scope 文本，便于后续判断邮件拉取协议。
+    access_scope = str(token_result[2]).strip() if isinstance(token_result, (list, tuple)) and len(token_result) >= 3 else ""
     # 刷新失败时直接返回。
     if not token_ok:
         # 记录失败原因日志。
@@ -114,6 +116,7 @@ def _get_mail_code_by_parser(
         f"步骤 1/3：刷新 {service_name} access_token 完成",
         email_name=normalized_email_name,
         elapsed_ms=int((time.monotonic() - token_start_ts) * 1000),
+        access_scope=access_scope or "<empty>",
     )
     # 读取 access_token 字符串。
     access_token = token_payload
@@ -130,7 +133,7 @@ def _get_mail_code_by_parser(
     fetch_start_ts = time.monotonic()
     try:
         # 调用 outlook 的邮件拉取函数。
-        mail_info = get_mail_info(normalized_email_name, access_token)
+        mail_info = get_mail_info(normalized_email_name, access_token, access_scope)
     # 捕获拉取异常并记录日志。
     except Exception as exc:
         # 记录完整堆栈，便于排查 IMAP 认证或网络问题。
