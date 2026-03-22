@@ -268,6 +268,19 @@ class DeviceProcessManager:
         # 返回已连接的数据库对象。
         return user_db
 
+    def _get_user_rows_by_devices(self, user_db: UserDB, serials: list[str]) -> dict[str, dict[str, object]]:
+        """按设备 serial 读取占用账号信息。"""
+        # 预留批量查询接口位，当前仍逐设备回查，避免影响兼容性。
+        user_rows: dict[str, dict[str, object]] = {}
+        # 逐个设备读取当前账号占用关系。
+        for serial in serials:
+            user_row = user_db.get_user_by_device(serial)
+            # 命中记录时写入映射，供状态组装阶段复用。
+            if user_row:
+                user_rows[str(serial)] = dict(user_row)
+        # 返回设备到账号行的映射结果。
+        return user_rows
+
     def _get_worker(self, serial: str) -> WorkerHandle | None:
         """在线程锁保护下读取单个 worker 句柄。"""
         # 使用状态锁保护共享 worker 表读取。
@@ -289,9 +302,9 @@ class DeviceProcessManager:
             # 返回排序后的 worker 快照列表。
             return list(sorted(self._workers.items()))
 
-    def list_online_devices(self) -> list[str]:
-        # 从 adb 读取当前在线设备列表。
-        serials = list_online_serials()
+    def list_online_devices(self, force_refresh: bool = False, source: str = "") -> list[str]:
+        # 从 adb 读取当前在线设备列表，并把缓存策略和来源透传到底层。
+        serials = list_online_serials(force_refresh=force_refresh, source=source)
         return serials
 
     def _build_adb_server_args(self) -> list[str]:
@@ -944,7 +957,7 @@ class DeviceProcessManager:
 
     def start_all(self, register_mode: str = "") -> list[str]:
         # 启动所有在线设备对应的子进程。
-        serials = self.list_online_devices()
+        serials = self.list_online_devices(force_refresh=False, source="start_all")
         if not serials:
             return ["未检测到在线设备（adb devices 为空）"]
         # 批量启动时统一把注册方式透传给每一台设备。
@@ -1290,16 +1303,37 @@ class DeviceProcessManager:
 
     def status(self) -> list[dict[str, str | int | float]]:
         # 返回当前所有子进程状态快照，供 CLI/GUI 展示。
+        status_started_at = time.monotonic()
+        # 预置各阶段耗时指标，便于失败时也能输出诊断日志。
+        drain_events_elapsed_ms = 0
+        db_open_elapsed_ms = 0
+        device_lookup_elapsed_ms = 0
+        row_build_elapsed_ms = 0
+        # 先把 worker 事件队列清空到内存快照。
+        step_started_at = time.monotonic()
         self.drain_events()
+        drain_events_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
         # 打开短连接，避免后台线程复用同一 SQLite 连接导致异常。
         user_db: UserDB | None = None
         rows: list[dict[str, str | int | float]] = []
         try:
             # 打开短连接，供状态快照阶段读取设备占用邮箱。
+            step_started_at = time.monotonic()
             user_db = self._open_user_db(connect_timeout_sec=0.6, busy_timeout_ms=600)
-            for serial, worker in self._snapshot_workers():
-                # 从 t_user.device 反查当前设备占用账号。
-                user_row = user_db.get_user_by_device(serial)
+            db_open_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 先快照当前 worker 列表，避免后续多次加锁遍历。
+            worker_items = self._snapshot_workers()
+            # 抽取当前全部 serial，供设备占用关系统一查询。
+            serials = [serial for serial, _ in worker_items]
+            # 读取设备绑定账号关系。
+            step_started_at = time.monotonic()
+            user_rows = self._get_user_rows_by_devices(user_db=user_db, serials=serials)
+            device_lookup_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
+            # 组装最终状态行。
+            step_started_at = time.monotonic()
+            for serial, worker in worker_items:
+                # 从设备到账号映射中读取当前邮箱绑定。
+                user_row = user_rows.get(serial, {})
                 email_account = str(user_row.get("email_account", "")).strip() if user_row else ""
                 rows.append(
                     {
@@ -1319,6 +1353,7 @@ class DeviceProcessManager:
                         "updated_at": worker.updated_at,
                     }
                 )
+            row_build_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
         finally:
             # 短连接使用后立即关闭，避免连接泄漏。
             if user_db is not None:
@@ -1328,4 +1363,17 @@ class DeviceProcessManager:
                 except Exception:
                     # 关闭失败只记日志，不影响状态返回。
                     log.exception("关闭状态快照数据库连接失败")
+        # 计算本轮状态快照总耗时。
+        total_elapsed_ms = int((time.monotonic() - status_started_at) * 1000)
+        # 状态快照耗时较长时升级为告警日志，便于继续压缩卡顿来源。
+        level_method = log.warning if total_elapsed_ms >= 1000 else log.debug
+        level_method(
+            "manager.status 快照完成",
+            total_elapsed_ms=total_elapsed_ms,
+            drain_events_elapsed_ms=drain_events_elapsed_ms,
+            db_open_elapsed_ms=db_open_elapsed_ms,
+            device_lookup_elapsed_ms=device_lookup_elapsed_ms,
+            row_build_elapsed_ms=row_build_elapsed_ms,
+            row_count=len(rows),
+        )
         return rows

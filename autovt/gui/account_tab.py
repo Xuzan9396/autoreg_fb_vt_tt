@@ -75,7 +75,8 @@ class AccountTab:
         self.page_text: ft.Text | None = None
         self.prev_button: ft.OutlinedButton | None = None
         self.next_button: ft.OutlinedButton | None = None
-        self.retryable_problem_count_text: ft.Text | None = None
+        self.fb_retryable_problem_count_text: ft.Text | None = None
+        self.vt_retryable_problem_count_text: ft.Text | None = None
         self.import_country_dropdown: ft.Dropdown | None = None
         self.import_file_picker: ft.FilePicker | None = None
 
@@ -97,6 +98,8 @@ class AccountTab:
         self._editing_device_value = ""
         # 缓存当前编辑账号的 Facebook 失败累计次数，避免编辑时被默认值覆盖。
         self._editing_fb_fail_num = 0
+        # 缓存当前编辑账号的 Vinted 失败累计次数，避免编辑时被默认值覆盖。
+        self._editing_vt_fail_num = 0
         self._active_dialog: ft.AlertDialog | None = None
         self._active_dialog_title = ""
         self._active_dialog_trace_id: str | None = None
@@ -200,17 +203,32 @@ class AccountTab:
         if self.import_file_picker not in self.page.services:
             # 把文件选择器挂到页面级 services。
             self.page.services.append(self.import_file_picker)
-        # 创建“可恢复账号数量”提示文本，避免把数量直接拼进按钮文案导致宽度抖动。
-        self.retryable_problem_count_text = ft.Text(
+        # 创建“FB 可恢复账号数量”提示文本，避免把数量直接拼进按钮文案导致宽度抖动。
+        self.fb_retryable_problem_count_text = ft.Text(
             value="可恢复: -",
             size=12,
             color=ft.Colors.BLUE_GREY_700,
         )
-        # 将“一键恢复”按钮与可恢复数量并排展示，便于用户直接判断是否有可处理账号。
-        reset_problem_action = ft.Row(
+        # 创建“VT 可恢复账号数量”提示文本，避免把数量直接拼进按钮文案导致宽度抖动。
+        self.vt_retryable_problem_count_text = ft.Text(
+            value="可恢复: -",
+            size=12,
+            color=ft.Colors.BLUE_GREY_700,
+        )
+        # 将“一键恢复fb”按钮与可恢复数量并排展示，便于用户直接判断是否有可处理账号。
+        reset_fb_problem_action = ft.Row(
             controls=[
-                ft.OutlinedButton("一键恢复账号问题", icon=ft.Icons.RESTART_ALT, on_click=self._reset_retryable_problem_accounts),
-                self.retryable_problem_count_text,
+                ft.OutlinedButton("一键恢复fb", icon=ft.Icons.RESTART_ALT, on_click=self._reset_retryable_problem_fb_accounts),
+                self.fb_retryable_problem_count_text,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        # 将“一键恢复vt”按钮与可恢复数量并排展示，便于用户直接判断是否有可处理账号。
+        reset_vt_problem_action = ft.Row(
+            controls=[
+                ft.OutlinedButton("一键恢复vt", icon=ft.Icons.RESTART_ALT, on_click=self._reset_retryable_problem_vt_accounts),
+                self.vt_retryable_problem_count_text,
             ],
             spacing=8,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -220,7 +238,8 @@ class AccountTab:
             controls=[
                 ft.FilledButton("新增账号", icon=ft.Icons.ADD, on_click=self._open_create_dialog),
                 ft.FilledButton("刷新账号", icon=ft.Icons.REFRESH, on_click=lambda e: self.refresh(source="manual", show_toast=True)),
-                reset_problem_action,
+                reset_fb_problem_action,
+                reset_vt_problem_action,
                 ft.OutlinedButton("一键导出", icon=ft.Icons.DOWNLOAD, on_click=self._handle_export_filtered_accounts),
                 import_country_selector,
                 ft.OutlinedButton("一键导入文件", icon=ft.Icons.UPLOAD_FILE, on_click=self._pick_import_file),
@@ -228,9 +247,9 @@ class AccountTab:
             alignment=ft.MainAxisAlignment.START,
             spacing=8,
         )
-        # 展示“风控状态 + 一键恢复账号问题”的规则说明，避免用户误解批量操作条件。
+        # 展示“风控状态 + 一键恢复 FB/VT”的规则说明，避免用户误解批量操作条件。
         problem_reset_hint = ft.Text(
-            "说明：右侧“可恢复: N”表示现在还能重新启用的账号数量。点击“一键恢复账号问题”后，会把“账号问题”里失败少于 3 次、且 Facebook 还没成功的账号，改回“未使用”并清空设备绑定。“风控限制”的账号不会被这个按钮处理。",
+            "说明：两个按钮右侧“可恢复: N”分别表示当前还能重新启用的 FB/VT 账号数量。点击“一键恢复fb”后，会把“账号问题”里 FB 失败少于 3 次、且 FB 还没成功的账号，改回“未使用”、清空设备绑定，并把 fb_status 改回 0。点击“一键恢复vt”后，会把 VT 失败少于 3 次、且 VT 还没成功的账号，改回“未使用”、清空设备绑定，并把 vinted_status 改回 0。“风控限制”的账号不会被这两个按钮处理。",
             size=12,
             color=ft.Colors.BLUE_GREY_700,
         )
@@ -346,7 +365,10 @@ class AccountTab:
             # 记录渲染提交起点。
             step_started_at = time.monotonic()
             # 更新顶部“可恢复账号”数量显示。
-            self._apply_retryable_problem_count(snapshot["retryable_count"])
+            self._apply_retryable_problem_counts(
+                fb_retryable_count=snapshot["fb_retryable_count"],
+                vt_retryable_count=snapshot["vt_retryable_count"],
+            )
             # 渲染当前页账号卡片。
             self._render_rows(rows)
             # 更新顶部汇总统计。
@@ -471,8 +493,10 @@ class AccountTab:
             list_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
             # 记录可恢复数量查询起点。
             step_started_at = time.monotonic()
-            # 查询当前满足“一键恢复”条件的账号总数。
-            retryable_count = int(reader.count_retryable_problem_users(max_fb_fail_num=3))
+            # 查询当前满足“一键恢复fb”条件的账号总数。
+            fb_retryable_count = int(reader.count_retryable_problem_fb_users(max_fb_fail_num=3))
+            # 查询当前满足“一键恢复vt”条件的账号总数。
+            vt_retryable_count = int(reader.count_retryable_problem_vt_users(max_vt_fail_num=3))
             # 统计“可恢复账号数”查询耗时。
             retryable_count_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
             # 返回当前页所需完整快照。
@@ -483,7 +507,8 @@ class AccountTab:
                 "page_index": safe_page_index,
                 "total_count": total_count,
                 "total_pages": total_pages,
-                "retryable_count": retryable_count,
+                "fb_retryable_count": fb_retryable_count,
+                "vt_retryable_count": vt_retryable_count,
                 "rows": rows,
             }
         finally:
@@ -495,23 +520,30 @@ class AccountTab:
                 # 关闭失败时仅记录日志，不再影响主流程。
                 log.warning("关闭账号页快照读取连接失败", error=str(exc))
 
-    def _apply_retryable_problem_count(self, retryable_count: int | str) -> None:
-        """把后台查询结果安全回填到顶部“可恢复账号”提示。"""
+    def _apply_retryable_problem_count(self, text_control: ft.Text | None, retryable_count: int | str) -> None:
+        """把后台查询结果安全回填到指定顶部“可恢复账号”提示。"""
         # 顶部计数控件尚未构建时直接返回，避免初始化阶段访问空引用。
-        if not self.retryable_problem_count_text:
+        if not text_control:
             return
         # 对统计结果做非负保护，避免异常值污染界面。
         safe_retryable_count = max(int(retryable_count), 0)
         # 把最新数量显示到按钮右侧文本。
-        self.retryable_problem_count_text.value = f"可恢复: {safe_retryable_count}"
+        text_control.value = f"可恢复: {safe_retryable_count}"
         # 有可恢复账号时使用更醒目的颜色，方便用户注意到待处理数量。
         if safe_retryable_count > 0:
-            self.retryable_problem_count_text.color = ft.Colors.ORANGE_700
-            self.retryable_problem_count_text.weight = ft.FontWeight.W_600
+            text_control.color = ft.Colors.ORANGE_700
+            text_control.weight = ft.FontWeight.W_600
         # 没有可恢复账号时恢复中性色，降低视觉噪音。
         else:
-            self.retryable_problem_count_text.color = ft.Colors.BLUE_GREY_700
-            self.retryable_problem_count_text.weight = ft.FontWeight.W_500
+            text_control.color = ft.Colors.BLUE_GREY_700
+            text_control.weight = ft.FontWeight.W_500
+
+    def _apply_retryable_problem_counts(self, fb_retryable_count: int | str, vt_retryable_count: int | str) -> None:
+        """把后台查询结果安全回填到顶部 FB/VT 可恢复账号提示。"""
+        # 回填顶部 FB 可恢复账号数量。
+        self._apply_retryable_problem_count(self.fb_retryable_problem_count_text, fb_retryable_count)
+        # 回填顶部 VT 可恢复账号数量。
+        self._apply_retryable_problem_count(self.vt_retryable_problem_count_text, vt_retryable_count)
 
     # ═══════════════════════════════════════════════════════════════════
     # 渲染
@@ -689,6 +721,8 @@ class AccountTab:
         fb_val = int(row_data.get("fb_status", 0))
         # 读取 Facebook 失败累计次数，空值时安全回退 0。
         fb_fail_num = int(row_data.get("fb_fail_num", 0) or 0)
+        # 读取 Vinted 失败累计次数，空值时安全回退 0。
+        vt_fail_num = int(row_data.get("vt_fail_num", 0) or 0)
         tiktok_val = int(row_data.get("titok_status", 0))
         update_at_val = int(row_data.get("update_at", 0))
 
@@ -743,6 +777,7 @@ class AccountTab:
                     ),
                     ft.Text(f"姓名: {name_text} | 更新时间: {update_text}", size=12, color=ft.Colors.BLUE_GREY_700),
                     ft.Text(f"FB失败累计: {fb_fail_num}", size=12, color=ft.Colors.BLUE_GREY_700),
+                    ft.Text(f"VT失败累计: {vt_fail_num}", size=12, color=ft.Colors.BLUE_GREY_700),
                     ft.Text(f"设备ID: {device_id or '-'}", size=12, color=ft.Colors.BLUE_GREY_700),
                     ft.Text(f"email_access_key: {masked_key}", size=12, color=ft.Colors.BLUE_GREY_800),
                     ft.Text(f"备注: {msg or '-'}", size=12, color=ft.Colors.BLUE_GREY_700, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
@@ -843,23 +878,41 @@ class AccountTab:
         self._page_index = 1
         self.refresh(source="filter_reset", show_toast=False)
 
-    def _reset_retryable_problem_accounts(self, _e: ft.ControlEvent | None = None) -> None:
-        # 记录批量恢复动作开始日志，便于排查“为什么有些账号没有被改回去”。
-        log.info("开始批量恢复可重试账号问题记录")
+    def _reset_retryable_problem_fb_accounts(self, _e: ft.ControlEvent | None = None) -> None:
+        # 记录批量恢复 FB 动作开始日志，便于排查“为什么有些账号没有被改回去”。
+        log.info("开始批量恢复可重试 FB 账号问题记录")
         try:
             # 执行批量恢复：仅处理 status=3、失败次数小于 3、且 fb_status 非成功的账号。
-            affected_rows = self.user_db.reset_retryable_problem_users(max_fb_fail_num=3)
+            affected_rows = self.user_db.reset_retryable_problem_fb_users(max_fb_fail_num=3)
             # 记录本次批量恢复影响行数。
-            log.info("批量恢复可重试账号问题记录完成", affected_rows=affected_rows)
+            log.info("批量恢复可重试 FB 账号问题记录完成", affected_rows=affected_rows)
             # 恢复完成后刷新当前列表，确保界面立即反映最新状态。
             self.refresh(source="reset_problem_accounts", show_toast=False)
             # 给出操作结果提示。
-            self._show_snack(f"一键恢复账号问题完成，共更新 {affected_rows} 条账号。")
+            self._show_snack(f"一键恢复fb完成，共更新 {affected_rows} 条账号。")
         except Exception as exc:
             # 记录批量恢复异常栈，便于定位 SQL 或刷新异常。
-            log.exception("批量恢复可重试账号问题记录失败", error=str(exc))
+            log.exception("批量恢复可重试 FB 账号问题记录失败", error=str(exc))
             # 给用户返回可读错误提示。
-            self._show_snack(f"一键恢复账号问题失败: {exc}")
+            self._show_snack(f"一键恢复fb失败: {exc}")
+
+    def _reset_retryable_problem_vt_accounts(self, _e: ft.ControlEvent | None = None) -> None:
+        # 记录批量恢复 VT 动作开始日志，便于排查“为什么有些账号没有被改回去”。
+        log.info("开始批量恢复可重试 VT 账号问题记录")
+        try:
+            # 执行批量恢复：仅处理 status=3、失败次数小于 3、且 vinted_status 非成功的账号。
+            affected_rows = self.user_db.reset_retryable_problem_vt_users(max_vt_fail_num=3)
+            # 记录本次批量恢复影响行数。
+            log.info("批量恢复可重试 VT 账号问题记录完成", affected_rows=affected_rows)
+            # 恢复完成后刷新当前列表，确保界面立即反映最新状态。
+            self.refresh(source="reset_problem_accounts", show_toast=False)
+            # 给出操作结果提示。
+            self._show_snack(f"一键恢复vt完成，共更新 {affected_rows} 条账号。")
+        except Exception as exc:
+            # 记录批量恢复异常栈，便于定位 SQL 或刷新异常。
+            log.exception("批量恢复可重试 VT 账号问题记录失败", error=str(exc))
+            # 给用户返回可读错误提示。
+            self._show_snack(f"一键恢复vt失败: {exc}")
 
     # 定义“导出按钮点击入口”方法。
     def _handle_export_filtered_accounts(self, _e: ft.ControlEvent | None = None) -> None:
@@ -1406,6 +1459,8 @@ class AccountTab:
         self._editing_device_value = v("device", "")
         # 缓存当前编辑账号的 Facebook 失败累计次数，避免编辑其他字段时被重置。
         self._editing_fb_fail_num = int(initial_row.get("fb_fail_num", 0) or 0) if initial_row else 0
+        # 缓存当前编辑账号的 Vinted 失败累计次数，避免编辑其他字段时被重置。
+        self._editing_vt_fail_num = int(initial_row.get("vt_fail_num", 0) or 0) if initial_row else 0
 
         self.quick_parse_input = ft.TextField(
             label="一键识别（固定 4 段）",
@@ -1848,6 +1903,8 @@ class AccountTab:
             fb_status=g(self.fb_status_dropdown) or "0",
             # 保留当前账号已有的 Facebook 失败累计次数，不允许编辑弹窗改写。
             fb_fail_num=self._editing_fb_fail_num,
+            # 保留当前账号已有的 Vinted 失败累计次数，不允许编辑弹窗改写。
+            vt_fail_num=self._editing_vt_fail_num,
             vinted_status=g(self.vinted_status_dropdown) or "0",
             titok_status=g(self.titok_status_dropdown) or "0",
             device=self._editing_device_value,

@@ -16,6 +16,7 @@ from typing import Callable
 import flet as ft
 
 from autovt.gui.account_tab import AccountTab
+from autovt.gui.device_refresh_coordinator import DeviceRefreshCoordinator
 from autovt.gui.device_tab import DeviceTab
 from autovt.gui.helpers import DEVICE_MONITOR_INTERVAL_SEC
 from autovt.gui.login_view import LoginView
@@ -45,11 +46,13 @@ class AutoVTGuiApp:
         # GUI 连接使用短超时，避免被 worker 写锁长时间阻塞导致界面卡顿。
         self.user_db = UserDB(connect_timeout_sec=1.2, busy_timeout_ms=1200)
         self.user_db.connect()
+        # 设备刷新统一交给独立协调器，避免设备页自己并发抢线程池。
+        self.device_refresh_coordinator = DeviceRefreshCoordinator(manager=self.manager)
 
         # ── 子模块 ──
         self.login_view = LoginView(page=page, on_login_success=self._on_login_success)
         self.device_tab = DeviceTab(
-            page=page, manager=self.manager,
+            page=page, manager=self.manager, coordinator=self.device_refresh_coordinator,
             show_snack=self._show_snack, run_action=self._run_action,
         )
         self.account_tab = AccountTab(page=page, user_db=self.user_db, show_snack=self._show_snack)
@@ -154,7 +157,8 @@ class AutoVTGuiApp:
     def _on_login_success(self) -> None:
         self._logged_in = True
         self._build_dashboard_view()
-        self.device_tab.refresh(source="init", show_toast=False)
+        self.device_refresh_coordinator.start()
+        self._request_device_refresh(source="init", show_toast=False, force_refresh=True)
         self.page.run_task(self._monitor_devices_loop)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -253,7 +257,7 @@ class AutoVTGuiApp:
 
         # 切回设备列表时同步刷新设备状态。
         if new_index == 0:
-            self.device_tab.refresh(source="tab_switch", show_toast=False)
+            self._request_device_refresh(source="tab_switch", show_toast=False, allow_cached_replay=True)
         # 切到账号列表时刷新账号数据。
         elif new_index == 1:
             self.account_tab.refresh(source="tab_switch", show_toast=False)
@@ -307,6 +311,51 @@ class AutoVTGuiApp:
     # ═══════════════════════════════════════════════════════════════════
     # 工具方法
     # ═══════════════════════════════════════════════════════════════════
+
+    def _request_device_refresh(
+        self,
+        source: str,
+        show_toast: bool,
+        force_refresh: bool = False,
+        allow_cached_replay: bool = False,
+    ) -> None:
+        """调度一次设备页快照刷新。"""
+        # 设备页控件尚未构建完成时直接返回，避免提前操作空引用。
+        if not self.device_tab.device_list_column:
+            return
+        try:
+            # 把刷新任务挂到 Flet 异步循环，避免按钮事件里同步阻塞。
+            self.page.run_task(
+                self._request_device_refresh_async,
+                source,
+                show_toast,
+                force_refresh,
+                allow_cached_replay,
+            )
+        except Exception:
+            # 调度失败时记异常日志，方便排查生命周期时序问题。
+            log.exception("调度设备刷新协调器任务失败", source=source)
+
+    async def _request_device_refresh_async(
+        self,
+        source: str,
+        show_toast: bool,
+        force_refresh: bool = False,
+        allow_cached_replay: bool = False,
+    ) -> None:
+        """通过协调器请求快照并回填设备页。"""
+        try:
+            # 从统一协调器读取设备页快照。
+            snapshot = await self.device_refresh_coordinator.request_refresh(
+                source=source,
+                force_refresh=force_refresh,
+                allow_cached_replay=allow_cached_replay,
+            )
+            # 把快照应用到设备页，避免 app 层重复拼装 UI 数据。
+            self.device_tab.apply_snapshot(snapshot=snapshot, source=source, show_toast=show_toast)
+        except Exception:
+            # 刷新失败时记录完整堆栈，避免静默丢失诊断信息。
+            log.exception("通过协调器刷新设备页失败", source=source)
 
     def _run_action(self, action_name: str, fn: Callable[[], str | list[str]]) -> None:
         # 已有后台动作执行中时直接提示，避免多个重操作并发打架。
@@ -366,10 +415,13 @@ class AutoVTGuiApp:
         try:
             # 记录动作后刷新设备区起点。
             refresh_started_at = time.monotonic()
-            # 动作后立即刷新设备区，避免用户等待轮询才看到状态变化。
-            self.device_tab.refresh(source="action", show_toast=False)
-            # 提交页面更新，保证刷新结果尽快可见。
-            self.page.update()
+            # 动作后直接驱动协调器强制刷新，避免继续使用旧 adb 缓存。
+            snapshot = await self.device_refresh_coordinator.request_refresh(
+                source="action",
+                force_refresh=True,
+            )
+            # 把最新快照应用到设备页，保证用户立刻看到结果。
+            self.device_tab.apply_snapshot(snapshot=snapshot, source="action", show_toast=False)
             # 计算动作后刷新耗时。
             refresh_elapsed_ms = int((time.monotonic() - refresh_started_at) * 1000)
             # 刷新耗时较长时打告警日志，便于定位卡顿。
@@ -433,7 +485,7 @@ class AutoVTGuiApp:
             # 当前不在“设备列表”页时跳过自动刷新，避免后台日志扫描影响账号筛选流畅度。
             if self._current_tab_index != 0:
                 continue
-            self.device_tab.refresh(source="auto", show_toast=False)
+            await self._request_device_refresh_async(source="auto", show_toast=False)
 
     # ═══════════════════════════════════════════════════════════════════
     # 清理
@@ -452,6 +504,10 @@ class AutoVTGuiApp:
             self._shutdown_done = True
         # 停掉后台监控循环，避免退出期间继续触发自动刷新。
         self._monitor_running = False
+        try:
+            self.device_refresh_coordinator.close()
+        except Exception:
+            log.exception("GUI 退出清理失败（device_refresh_coordinator.close）")
         try:
             messages = self.manager.stop_all()
             log.info("GUI 退出清理完成", count=len(messages), messages=messages)

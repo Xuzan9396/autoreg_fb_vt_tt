@@ -92,6 +92,10 @@ REGISTER_STATUS_MAX = 2
 FB_FAIL_NUM_MIN = 0
 # 定义 Facebook 失败累计次数最大值（使用 32 位有符号整型上限做保护）。
 FB_FAIL_NUM_MAX = 2147483647
+# 定义 Vinted 失败累计次数最小值（0=从未失败）。
+VT_FAIL_NUM_MIN = 0
+# 定义 Vinted 失败累计次数最大值（使用 32 位有符号整型上限做保护）。
+VT_FAIL_NUM_MAX = 2147483647
 # 定义账号状态最小值（0=未使用）。
 ACCOUNT_STATUS_MIN = 0
 # 定义账号状态最大值（4=风控限制）。
@@ -206,6 +210,8 @@ class UserRecord:
     fb_status: int = 0
     # Facebook 注册失败累计次数字段，默认 0。
     fb_fail_num: int = 0
+    # Vinted 注册失败累计次数字段，默认 0。
+    vt_fail_num: int = 0
     # titok 状态字段，默认 0（1=成功）。
     titok_status: int = 0
     # 业务密码字段，默认空字符串。
@@ -315,6 +321,7 @@ class UserDB:
             vinted_status INTEGER NOT NULL DEFAULT 0 CHECK (vinted_status >= 0),
             fb_status INTEGER NOT NULL DEFAULT 0 CHECK (fb_status >= 0),
             fb_fail_num INTEGER NOT NULL DEFAULT 0 CHECK (fb_fail_num >= 0),
+            vt_fail_num INTEGER NOT NULL DEFAULT 0 CHECK (vt_fail_num >= 0),
             titok_status INTEGER NOT NULL DEFAULT 0 CHECK (titok_status >= 0),
             pwd TEXT NOT NULL DEFAULT '',
             device TEXT NOT NULL DEFAULT '',
@@ -385,6 +392,13 @@ class UserDB:
             # 执行 ALTER TABLE 增加 fb_fail_num 字段，并设置默认值和非空约束。
             conn.execute(
                 f"ALTER TABLE {TABLE_NAME} ADD COLUMN fb_fail_num INTEGER NOT NULL DEFAULT 0;"
+            # SQL 执行结束。
+            )
+        # 旧表缺少 vt_fail_num 列时执行补齐。
+        if "vt_fail_num" not in exists_columns:
+            # 执行 ALTER TABLE 增加 vt_fail_num 字段，并设置默认值和非空约束。
+            conn.execute(
+                f"ALTER TABLE {TABLE_NAME} ADD COLUMN vt_fail_num INTEGER NOT NULL DEFAULT 0;"
             # SQL 执行结束。
             )
         # 旧表缺少 client_id 列时执行补齐。
@@ -730,6 +744,8 @@ class UserDB:
         normalized_fb_status = self._normalize_int_range("fb_status", record.fb_status, REGISTER_STATUS_MIN, REGISTER_STATUS_MAX)
         # 校验并标准化 Facebook 失败累计次数（0~2147483647）。
         normalized_fb_fail_num = self._normalize_non_negative_int("fb_fail_num", record.fb_fail_num, FB_FAIL_NUM_MAX)
+        # 校验并标准化 Vinted 失败累计次数（0~2147483647）。
+        normalized_vt_fail_num = self._normalize_non_negative_int("vt_fail_num", record.vt_fail_num, VT_FAIL_NUM_MAX)
         # 校验并标准化 tt 状态（0~2）。
         normalized_titok_status = self._normalize_int_range("titok_status", record.titok_status, REGISTER_STATUS_MIN, REGISTER_STATUS_MAX)
         # 标准化设备字段（非必填，允许为空）。
@@ -763,6 +779,8 @@ class UserDB:
             fb_status=normalized_fb_status,
             # 写回标准化 Facebook 失败累计次数。
             fb_fail_num=normalized_fb_fail_num,
+            # 写回标准化 Vinted 失败累计次数。
+            vt_fail_num=normalized_vt_fail_num,
             # 写回标准化 tt 状态。
             titok_status=normalized_titok_status,
             # 写回标准化设备字段。
@@ -796,13 +814,14 @@ class UserDB:
             vinted_status,
             fb_status,
             fb_fail_num,
+            vt_fail_num,
             titok_status,
             pwd,
             device,
             msg,
             create_at,
             update_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email_account) DO UPDATE SET
             email_pwd = excluded.email_pwd,
             email_access_key = excluded.email_access_key,
@@ -813,6 +832,7 @@ class UserDB:
             vinted_status = excluded.vinted_status,
             fb_status = excluded.fb_status,
             fb_fail_num = excluded.fb_fail_num,
+            vt_fail_num = excluded.vt_fail_num,
             titok_status = excluded.titok_status,
             pwd = excluded.pwd,
             device = excluded.device,
@@ -841,6 +861,8 @@ class UserDB:
             int(normalized_record.fb_status),
             # 传入 Facebook 失败累计次数并强转为 int。
             int(normalized_record.fb_fail_num),
+            # 传入 Vinted 失败累计次数并强转为 int。
+            int(normalized_record.vt_fail_num),
             # 传入 titok 状态并强转为 int。
             int(normalized_record.titok_status),
             # 传入业务密码。
@@ -1404,13 +1426,14 @@ class UserDB:
             vinted_status,
             fb_status,
             fb_fail_num,
+            vt_fail_num,
             titok_status,
             pwd,
             device,
             msg,
             create_at,
             update_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         # 组装 SQL 参数元组。
         params = (
@@ -1434,6 +1457,8 @@ class UserDB:
             int(normalized_record.fb_status),
             # Facebook 失败累计次数。
             int(normalized_record.fb_fail_num),
+            # Vinted 失败累计次数。
+            int(normalized_record.vt_fail_num),
             # titok 状态。
             int(normalized_record.titok_status),
             # vinted 密码字段。
@@ -1492,6 +1517,7 @@ class UserDB:
             vinted_status = ?,
             fb_status = ?,
             fb_fail_num = ?,
+            vt_fail_num = ?,
             titok_status = ?,
             pwd = ?,
             device = ?,
@@ -1521,6 +1547,8 @@ class UserDB:
             int(normalized_record.fb_status),
             # Facebook 失败累计次数。
             int(normalized_record.fb_fail_num),
+            # Vinted 失败累计次数。
+            int(normalized_record.vt_fail_num),
             # titok 状态。
             int(normalized_record.titok_status),
             # vinted 密码字段。
@@ -1766,6 +1794,7 @@ class UserDB:
         fb_status: int | None = None,
         vinted_status: int | None = None,
         increment_fb_fail_num: bool = False,
+        increment_vt_fail_num: bool = False,
     ) -> int:
         # 获取可用连接。
         conn = self.connect()
@@ -1781,6 +1810,8 @@ class UserDB:
         safe_msg = None if msg is None else str(msg)
         # 标准化“是否累加 Facebook 失败次数”参数。
         should_increment_fb_fail_num = bool(increment_fb_fail_num)
+        # 标准化“是否累加 Vinted 失败次数”参数。
+        should_increment_vt_fail_num = bool(increment_vt_fail_num)
         # 初始化更新子句列表。
         set_parts: list[str] = []
         # 初始化 SQL 参数列表。
@@ -1811,6 +1842,10 @@ class UserDB:
         if should_increment_fb_fail_num:
             # 使用数据库原子自增，避免并发下先查后改导致覆盖。
             set_parts.append("fb_fail_num = fb_fail_num + 1")
+        # 需要累加 Vinted 失败次数时追加原子自增子句。
+        if should_increment_vt_fail_num:
+            # 使用数据库原子自增，避免并发下先查后改导致覆盖。
+            set_parts.append("vt_fail_num = vt_fail_num + 1")
         # 无论何种分支都追加更新时间字段。
         set_parts.append("update_at = ?")
         # 追加更新时间参数。
@@ -1832,13 +1867,13 @@ class UserDB:
         # 返回受影响行数，便于上层判断是否更新成功。
         return int(cursor.rowcount)
 
-    # 定义“统计可恢复账号总数”方法。
-    def count_retryable_problem_users(self, max_fb_fail_num: int = 3) -> int:
+    # 定义“统计可恢复 Facebook 账号总数”方法。
+    def count_retryable_problem_fb_users(self, max_fb_fail_num: int = 3) -> int:
         # 获取可用连接。
         conn = self.connect()
         # 对失败次数阈值做下限保护，避免传入负数导致条件失真。
         safe_max_fb_fail_num = max(int(max_fb_fail_num), 0)
-        # 执行“可恢复账号数”统计 SQL。
+        # 执行“可恢复 Facebook 账号数”统计 SQL。
         cursor = conn.execute(
             f"""
             SELECT COUNT(1) AS total
@@ -1857,11 +1892,39 @@ class UserDB:
         # 理论上不会为空，这里做防御性回退。
         if row is None:
             return 0
-        # 返回可恢复账号总数。
+        # 返回可恢复 Facebook 账号总数。
         return int(row["total"])
 
-    # 定义“一键恢复可重试账号问题记录”方法。
-    def reset_retryable_problem_users(self, max_fb_fail_num: int = 3) -> int:
+    # 定义“统计可恢复 Vinted 账号总数”方法。
+    def count_retryable_problem_vt_users(self, max_vt_fail_num: int = 3) -> int:
+        # 获取可用连接。
+        conn = self.connect()
+        # 对失败次数阈值做下限保护，避免传入负数导致条件失真。
+        safe_max_vt_fail_num = max(int(max_vt_fail_num), 0)
+        # 执行“可恢复 Vinted 账号数”统计 SQL。
+        cursor = conn.execute(
+            f"""
+            SELECT COUNT(1) AS total
+            FROM {TABLE_NAME}
+            WHERE
+                status = 3
+                AND vt_fail_num < ?
+                AND vinted_status != 1;
+            """,
+            # 传入失败次数阈值参数。
+            (int(safe_max_vt_fail_num),),
+        # SQL 执行结束。
+        )
+        # 读取统计结果首行。
+        row = cursor.fetchone()
+        # 理论上不会为空，这里做防御性回退。
+        if row is None:
+            return 0
+        # 返回可恢复 Vinted 账号总数。
+        return int(row["total"])
+
+    # 定义“一键恢复可重试 Facebook 账号问题记录”方法。
+    def reset_retryable_problem_fb_users(self, max_fb_fail_num: int = 3) -> int:
         # 获取可用连接。
         conn = self.connect()
         # 对失败次数阈值做下限保护，避免传入负数导致全表命中。
@@ -1870,12 +1933,13 @@ class UserDB:
         update_time = now_ts()
         # 使用事务上下文执行批量更新，保证状态和 device 同步切换。
         with conn:
-            # 执行批量恢复 SQL。
+            # 执行批量恢复 Facebook SQL。
             cursor = conn.execute(
                 f"""
                 UPDATE {TABLE_NAME}
                 SET
                     status = 0,
+                    fb_status = 0,
                     device = '',
                     update_at = ?
                 WHERE
@@ -1887,5 +1951,36 @@ class UserDB:
                 (int(update_time), int(safe_max_fb_fail_num)),
             # SQL 执行结束。
             )
-        # 返回本次批量恢复影响行数。
+        # 返回本次批量恢复 Facebook 影响行数。
+        return int(cursor.rowcount)
+
+    # 定义“一键恢复可重试 Vinted 账号问题记录”方法。
+    def reset_retryable_problem_vt_users(self, max_vt_fail_num: int = 3) -> int:
+        # 获取可用连接。
+        conn = self.connect()
+        # 对失败次数阈值做下限保护，避免传入负数导致全表命中。
+        safe_max_vt_fail_num = max(int(max_vt_fail_num), 0)
+        # 生成本次批量更新时间戳。
+        update_time = now_ts()
+        # 使用事务上下文执行批量更新，保证状态和 device 同步切换。
+        with conn:
+            # 执行批量恢复 Vinted SQL。
+            cursor = conn.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET
+                    status = 0,
+                    vinted_status = 0,
+                    device = '',
+                    update_at = ?
+                WHERE
+                    status = 3
+                    AND vt_fail_num < ?
+                    AND vinted_status != 1;
+                """,
+                # 传入更新时间和失败次数阈值。
+                (int(update_time), int(safe_max_vt_fail_num)),
+            # SQL 执行结束。
+            )
+        # 返回本次批量恢复 Vinted 影响行数。
         return int(cursor.rowcount)

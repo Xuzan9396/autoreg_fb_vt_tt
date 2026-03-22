@@ -3,35 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-from collections import deque
-from pathlib import Path
 from typing import Any, Callable
 
 import flet as ft
 
+from autovt.gui.device_refresh_coordinator import (
+    DEVICE_LOG_MAX_LINES,
+    DeviceRefreshCoordinator,
+    DeviceRefreshSnapshot,
+)
 from autovt.gui.helpers import DeviceViewModel, state_color, state_text
 from autovt.logs import get_logger
 from autovt.multiproc.manager import DeviceProcessManager
-from autovt.settings import JSON_LOG_DIR
 
 log = get_logger("gui.device")
-# 设备页日志框最多展示 100 条消息文本。
-DEVICE_LOG_MAX_LINES = 100
-# 每个日志文件最多回读 200 行，兼顾性能和“最新”准确度。
-DEVICE_LOG_TAIL_PER_FILE = 200
-# 自动刷新时日志读取最小间隔（秒），避免每轮都扫磁盘导致卡顿。
-DEVICE_LOG_AUTO_REFRESH_MIN_INTERVAL_SEC = 12.0
-# 每轮最多扫描最近 N 个日志文件，避免历史文件过多时读取过慢。
-DEVICE_LOG_SCAN_MAX_FILES = 6
-# 仅展示 task.open_settings 组件日志（按 component 字段过滤）。
-OPEN_SETTINGS_COMPONENT_TOKENS = (
-    # 当前 compact 文本中的常规输出格式。
-    "component=task.open_settings",
-    # 兼容历史日志里带引号的输出格式。
-    'component="task.open_settings"',
-)
 
 
 class DeviceTab:
@@ -41,11 +27,13 @@ class DeviceTab:
         self,
         page: ft.Page,
         manager: DeviceProcessManager,
+        coordinator: DeviceRefreshCoordinator,
         show_snack: Callable[[str], None],
         run_action: Callable[[str, Callable[[], str | list[str]]], None],
     ) -> None:
         self.page = page
         self.manager = manager
+        self._coordinator = coordinator
         self._show_snack = show_snack
         self._run_action = run_action
 
@@ -53,19 +41,17 @@ class DeviceTab:
         self._last_online_serials: set[str] = set()
         # 缓存当前日志框的最新消息列表，供“一键复制”直接使用。
         self._latest_log_messages: list[str] = []
-        # 缓存最近一次“解析后日志记录”（时间, 消息），用于自动刷新节流复用。
-        self._cached_log_records: list[tuple[str, str]] = []
-        # 记录最近一次日志读取时间（monotonic 秒）。
-        self._last_log_load_mono_ts: float = 0.0
         # 是否跟随最新日志到底部；用户手动上滑后会临时关闭。
         self._logs_follow_latest = True
         # 是否正在执行日志清空任务，避免重复并发改写日志文件。
         self._clearing_logs = False
+        # 缓存最近一次已应用的快照，便于失败时继续维持界面稳定。
+        self._last_snapshot: DeviceRefreshSnapshot | None = None
 
         self.summary_text: ft.Text | None = None
         self.last_refresh_text: ft.Text | None = None
         self.device_list_column: ft.Column | None = None
-        self.log_list_column: ft.Column | None = None
+        self.log_list_view: ft.ListView | None = None
         # 日志区元信息文本（条数 + 最近刷新时间）。
         self.log_meta_text: ft.Text | None = None
         # 注册方式下拉框控件引用，供后续启动动作读取当前选择。
@@ -93,14 +79,42 @@ class DeviceTab:
             scroll=ft.ScrollMode.ALWAYS,
             expand=True,
         )
-        # 创建设备日志列表容器（仅展示消息文本）。
-        self.log_list_column = ft.Column(
+        # 创建设备日志列表容器，并切换为更适合大量行渲染的 ListView。
+        self.log_list_view = ft.ListView(
             # 初始占位文本改成白字，匹配黑底日志框。
             controls=[ft.Text("日志待加载...", color=ft.Colors.WHITE70)],
             # 日志行间距设置为 4，提升可读性。
             spacing=4,
             # 日志列表滚动条常驻显示，避免“看不清是否可滚动”。
             scroll=ft.ScrollMode.ALWAYS,
+            # 开启按需构建，减少大日志列表一次性创建控件的压力。
+            build_controls_on_demand=True,
+            # 为日志列表提供原型项，帮助 Flet 估算布局成本。
+            prototype_item=ft.Container(
+                padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                content=ft.Row(
+                    controls=[
+                        ft.Container(
+                            width=92,
+                            content=ft.Text(
+                                "00:00:00.000",
+                                size=11,
+                                color=ft.Colors.CYAN_200,
+                                font_family="monospace",
+                            ),
+                        ),
+                        ft.Text(
+                            "示例日志",
+                            size=12,
+                            color=ft.Colors.WHITE,
+                            font_family="monospace",
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ),
+            ),
             # 关闭强制自动滚动，改为“默认跟随最新 + 用户上滑可查看历史”。
             auto_scroll=False,
             # 监听日志滚动位置，判断是否继续跟随最新。
@@ -135,13 +149,6 @@ class DeviceTab:
                 ft.dropdown.Option("vinted", "vinted注册"),
             ],
         )
-        try:
-            # 构建设备页时异步加载一次日志，避免首次进入同步扫盘卡住界面。
-            self.page.run_task(self._refresh_logs_view_async, True)
-        except Exception:
-            # 调度失败时记录日志，避免初次进入因日志任务异常而无反馈。
-            log.exception("调度设备页初始日志加载任务失败")
-
         # 顶部操作区改为可换行 Row，按钮按内容宽度展示，避免被网格拉得过长。
         top_actions = ft.Row(
             controls=[
@@ -306,7 +313,7 @@ class DeviceTab:
                                 # 增大右侧空隙，让常驻滚动条更清晰。
                                 padding=ft.padding.only(right=8),
                                 # 直接挂载滚动列表，避免 SelectionArea 抢占滚轮事件。
-                                content=self.log_list_column,
+                                content=self.log_list_view,
                             ),
                         ],
                         # 头部和内容之间保留舒适间距。
@@ -319,6 +326,10 @@ class DeviceTab:
             spacing=10,
             expand=True,
         )
+        # 构建完成后先尝试回放协调器里的现有快照，避免页面创建时再单独扫盘。
+        cached_snapshot = self._coordinator.get_snapshot()
+        if cached_snapshot.refreshed_at > 0:
+            self.apply_snapshot(snapshot=cached_snapshot, source="build", show_toast=False, update_page=False)
         # 用 expand 容器包裹根列，确保高度约束生效。
         return ft.Container(expand=True, content=body)
 
@@ -399,176 +410,109 @@ class DeviceTab:
             log.exception("调度设备刷新任务失败", source=source)
 
     async def _refresh_async(self, source: str, show_toast: bool) -> None:
-        """异步刷新设备列表，耗时 IO 放到后台线程执行。"""
-        # 记录刷新开始时间，用于输出耗时诊断日志。
-        started_at = time.monotonic()
-        # 初始化各阶段耗时，默认值为 0（毫秒）。
-        adb_elapsed_ms = 0
-        # 初始化日志读取阶段耗时（毫秒）。
-        log_read_elapsed_ms = 0
-        # 初始化状态查询阶段耗时（毫秒）。
-        status_elapsed_ms = 0
-        # 初始化模型组装阶段耗时（毫秒）。
-        model_build_elapsed_ms = 0
-        # 初始化渲染提交阶段耗时（毫秒）。
-        render_elapsed_ms = 0
+        """异步刷新设备列表，数据由协调器统一提供。"""
         try:
-            # 定义“后台读取在线设备 + 统计耗时”的小方法。
-            async def _load_online_with_timing() -> tuple[set[str], int]:
-                # 记录读取在线设备起点。
-                online_started_at = time.monotonic()
-                # 在线程池读取在线设备，避免阻塞 UI 事件循环。
-                online_values = set(await asyncio.to_thread(self.manager.list_online_devices))
-                # 返回结果和耗时毫秒。
-                return online_values, int((time.monotonic() - online_started_at) * 1000)
-
-            # 定义“后台读取日志 + 统计耗时”的小方法。
-            async def _load_logs_with_timing() -> tuple[list[tuple[str, str]], int]:
-                # 记录日志读取起点。
-                logs_started_at = time.monotonic()
-                # 在线程池读取日志，避免阻塞 UI 事件循环。
-                records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
-                # 返回日志记录和耗时毫秒。
-                return records, int((time.monotonic() - logs_started_at) * 1000)
-
-            # 默认标记“本轮需要重新读取日志”。
-            need_reload_logs = True
-            # 仅自动刷新场景做日志读取节流，减少磁盘扫描压力。
-            if source == "auto":
-                # 读取当前单调时钟秒数。
-                now_mono = time.monotonic()
-                # 距离上次日志读取未超过阈值时，复用缓存日志。
-                if now_mono - self._last_log_load_mono_ts < DEVICE_LOG_AUTO_REFRESH_MIN_INTERVAL_SEC:
-                    # 标记本轮跳过日志重读。
-                    need_reload_logs = False
-
-            # 需要重读日志时并行执行“adb 在线设备读取”和“日志读取”。
-            if need_reload_logs:
-                # 并行启动两个后台任务，降低总等待时间。
-                online_task = _load_online_with_timing()
-                # 并行启动日志读取任务。
-                logs_task = _load_logs_with_timing()
-                # 等待两项任务同时完成。
-                (online_serials, adb_elapsed_ms), (log_records, log_read_elapsed_ms) = await asyncio.gather(online_task, logs_task)
-                # 更新日志缓存，供后续自动刷新复用。
-                self._cached_log_records = list(log_records)
-                # 记录本次日志读取时间。
-                self._last_log_load_mono_ts = time.monotonic()
-            # 不需要重读日志时，只读取在线设备，日志直接走缓存。
-            else:
-                # 仅执行在线设备读取，减少自动刷新耗时。
-                online_serials, adb_elapsed_ms = await _load_online_with_timing()
-                # 复用缓存日志记录，避免重复扫盘。
-                log_records = list(self._cached_log_records)
-                # 复用缓存场景记 0ms，表示未实际读取磁盘。
-                log_read_elapsed_ms = 0
-
-            # 记录状态查询阶段起点。
-            step_started_at = time.monotonic()
-            # 在线程池中读取状态快照，避免事件循环线程被设备状态查询阻塞。
-            status_rows = await asyncio.to_thread(self.manager.status)
-            # 计算状态查询阶段耗时。
-            status_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-
-            # 记录模型组装阶段起点。
-            step_started_at = time.monotonic()
-            # 把状态行按 serial 建成索引表，便于后续快速合并。
-            status_map = {str(row["serial"]): row for row in status_rows}
-            # 合并在线设备与已有 worker 状态，保证离线但仍在跑的进程可见。
-            merged_serials = sorted(online_serials | set(status_map.keys()))
-            # 准备最终渲染给 UI 的设备模型列表。
-            rows: list[DeviceViewModel] = []
-
-            # 遍历合并后的 serial，组装展示模型。
-            for serial in merged_serials:
-                # 读取当前设备对应的状态行（可能为空）。
-                row = status_map.get(serial, {})
-                # 追加一条设备展示模型。
-                rows.append(
-                    DeviceViewModel(
-                        # 设备序列号。
-                        serial=serial,
-                        # 是否在线（来自 adb devices）。
-                        online=serial in online_serials,
-                        # worker 进程 pid。
-                        pid=int(row.get("pid", -1)),
-                        # worker 存活标记。
-                        alive=str(row.get("alive", "no")),
-                        # worker 状态（running/paused/waiting...）。
-                        state=str(row.get("state", "idle")),
-                        # worker 详情文案。
-                        detail=str(row.get("detail", "未启动")),
-                        # 当前设备占用邮箱。
-                        email_account=str(row.get("email_account", "")).strip(),
-                        # 最近状态更新时间戳。
-                        updated_at=float(row.get("updated_at", 0.0)),
-                    )
-                )
-            # 计算模型组装阶段耗时。
-            model_build_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-
-            # 记录渲染提交阶段起点。
-            step_started_at = time.monotonic()
-            # 渲染设备卡片列表。
-            self._render_rows(rows)
-            # 渲染日志列表（使用后台线程已读取好的数据）。
-            self._render_logs_records(log_records)
-            # 更新顶部统计摘要。
-            self._update_summary(rows, online_serials)
-            # 根据刷新来源决定是否提示设备变化。
-            self._notify_changes(source=source, now_online=online_serials, show_toast=show_toast)
-            # 提交页面更新，确保控件变化立刻生效。
-            self.page.update()
-            # 计算渲染提交阶段耗时。
-            render_elapsed_ms = int((time.monotonic() - step_started_at) * 1000)
-            # 计算本次刷新总耗时（毫秒）。
-            elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            # 耗时超过阈值时打告警日志，便于定位卡顿源头。
-            if elapsed_ms >= 1500:
-                log.warning(
-                    "设备页刷新耗时较长",
-                    source=source,
-                    elapsed_ms=elapsed_ms,
-                    adb_elapsed_ms=adb_elapsed_ms,
-                    log_read_elapsed_ms=log_read_elapsed_ms,
-                    status_elapsed_ms=status_elapsed_ms,
-                    model_build_elapsed_ms=model_build_elapsed_ms,
-                    render_elapsed_ms=render_elapsed_ms,
-                    online_count=len(online_serials),
-                    status_count=len(status_rows),
-                    log_count=len(log_records),
-                )
-            # 正常耗时记录调试日志，便于后续对比。
-            else:
-                log.debug(
-                    "设备页刷新完成",
-                    source=source,
-                    elapsed_ms=elapsed_ms,
-                    adb_elapsed_ms=adb_elapsed_ms,
-                    log_read_elapsed_ms=log_read_elapsed_ms,
-                    status_elapsed_ms=status_elapsed_ms,
-                    model_build_elapsed_ms=model_build_elapsed_ms,
-                    render_elapsed_ms=render_elapsed_ms,
-                    online_count=len(online_serials),
-                    status_count=len(status_rows),
-                    log_count=len(log_records),
-                )
+            # 手动刷新、初始化和动作后刷新默认强制走真实数据源。
+            force_refresh = source in {"manual", "init", "action", "clear_logs"}
+            # 切回设备页时允许先回放最近快照，降低首帧等待时间。
+            allow_cached_replay = source in {"tab_switch", "build"}
+            # 从协调器请求统一快照，避免设备页自己再并发拉 adb/status/logs。
+            snapshot = await self._coordinator.request_refresh(
+                source=source,
+                force_refresh=force_refresh,
+                allow_cached_replay=allow_cached_replay,
+            )
+            # 把快照应用到界面。
+            self.apply_snapshot(snapshot=snapshot, source=source, show_toast=show_toast)
         except Exception as exc:
             # 记录完整堆栈，便于排查刷新失败原因。
-            log.exception(
-                "刷新设备列表失败",
-                source=source,
-                adb_elapsed_ms=adb_elapsed_ms,
-                log_read_elapsed_ms=log_read_elapsed_ms,
-                status_elapsed_ms=status_elapsed_ms,
-                model_build_elapsed_ms=model_build_elapsed_ms,
-                render_elapsed_ms=render_elapsed_ms,
-            )
+            log.exception("刷新设备列表失败", source=source)
             # 给用户一个可读错误提示。
             self._show_snack(f"刷新失败: {exc}")
         finally:
             # 无论成功失败都要复位刷新标记，避免后续无法再次刷新。
             self._refreshing = False
+
+    def apply_snapshot(
+        self,
+        snapshot: DeviceRefreshSnapshot,
+        source: str,
+        show_toast: bool,
+        update_page: bool = True,
+    ) -> None:
+        """把协调器快照应用到设备页。"""
+        # 控件尚未初始化时直接返回，避免构建前误更新。
+        if not self.device_list_column or not self.log_list_view:
+            return
+        # 记录 UI 应用起点，用于输出前端阶段耗时。
+        apply_started_at = time.monotonic()
+        # 把状态行按 serial 建索引，便于合并在线设备和离线 worker。
+        status_map = {str(row["serial"]): row for row in snapshot.status_rows}
+        # 合并在线设备和状态快照，保证离线但仍在跑的 worker 也可见。
+        merged_serials = sorted(set(snapshot.online_serials) | set(status_map.keys()))
+        # 组装渲染模型列表。
+        rows: list[DeviceViewModel] = []
+        for serial in merged_serials:
+            row = status_map.get(serial, {})
+            rows.append(
+                DeviceViewModel(
+                    serial=serial,
+                    online=serial in snapshot.online_serials,
+                    pid=int(row.get("pid", -1)),
+                    alive=str(row.get("alive", "no")),
+                    state=str(row.get("state", "idle")),
+                    detail=str(row.get("detail", "未启动")),
+                    email_account=str(row.get("email_account", "")).strip(),
+                    updated_at=float(row.get("updated_at", 0.0)),
+                )
+            )
+
+        # 渲染设备卡片与日志列表。
+        self._render_rows(rows)
+        self._render_logs_records(snapshot.log_records)
+        # 更新顶部摘要和最近刷新时间。
+        self._update_summary(rows=rows, online_serials=snapshot.online_serials, refreshed_at=snapshot.refreshed_at)
+        # 根据来源决定是否提示设备变化或手动刷新完成。
+        self._notify_changes(source=source, now_online=snapshot.online_serials, show_toast=show_toast)
+        # 记录最近一次成功应用的快照。
+        self._last_snapshot = snapshot
+        # 需要时提交页面刷新。
+        if update_page:
+            self.page.update()
+            # 保持“跟随最新”时，刷新后显式滚到最后一条。
+            if self._logs_follow_latest:
+                try:
+                    self.page.run_task(self._scroll_logs_to_latest_async)
+                except Exception:
+                    log.debug("调度日志自动滚动任务失败", source=source)
+
+        # 计算快照年龄，优先使用协调器已记录的值。
+        snapshot_age_ms = int(snapshot.metrics.snapshot_age_ms)
+        if snapshot_age_ms <= 0 and snapshot.refreshed_at > 0:
+            snapshot_age_ms = int(max(0.0, time.time() - snapshot.refreshed_at) * 1000)
+        # 计算 UI 应用耗时。
+        ui_apply_elapsed_ms = int((time.monotonic() - apply_started_at) * 1000)
+        # 刷新降级时，非自动刷新场景给用户明确反馈。
+        if snapshot.error_text and source != "auto":
+            self._show_snack(f"刷新降级: {snapshot.error_text}")
+        # 输出统一的设备页 UI 应用日志。
+        level_method = log.warning if ui_apply_elapsed_ms >= 1200 else log.debug
+        level_method(
+            "设备页应用快照完成",
+            source=source,
+            queue_wait_elapsed_ms=snapshot.metrics.queue_wait_elapsed_ms,
+            adb_elapsed_ms=snapshot.metrics.adb_elapsed_ms,
+            status_elapsed_ms=snapshot.metrics.status_elapsed_ms,
+            log_read_elapsed_ms=snapshot.metrics.log_read_elapsed_ms,
+            total_elapsed_ms=snapshot.metrics.total_elapsed_ms,
+            snapshot_age_ms=snapshot_age_ms,
+            cache_hit=snapshot.metrics.cache_hit,
+            ui_apply_elapsed_ms=ui_apply_elapsed_ms,
+            online_count=len(snapshot.online_serials),
+            status_count=len(snapshot.status_rows),
+            log_count=len(snapshot.log_records),
+            error_text=snapshot.error_text,
+        )
 
     # ── 内部方法 ─────────────────────────────────────────────────────────
 
@@ -661,12 +605,12 @@ class DeviceTab:
             ),
         )
 
-    def _update_summary(self, rows: list[DeviceViewModel], online_serials: set[str]) -> None:
+    def _update_summary(self, rows: list[DeviceViewModel], online_serials: set[str], refreshed_at: float) -> None:
         if self.summary_text:
             running_count = sum(1 for item in rows if item.alive == "yes")
             self.summary_text.value = f"在线设备: {len(online_serials)} | 运行进程: {running_count}"
         if self.last_refresh_text:
-            now_text = time.strftime("%H:%M:%S", time.localtime())
+            now_text = time.strftime("%H:%M:%S", time.localtime(refreshed_at or time.time()))
             self.last_refresh_text.value = f"最近刷新: {now_text}"
 
     def _notify_changes(self, source: str, now_online: set[str], show_toast: bool) -> None:
@@ -688,202 +632,10 @@ class DeviceTab:
 
     # ── 日志展示 ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _tail_lines(path: Path, max_lines: int) -> list[str]:
-        """读取文件尾部最多 max_lines 行。"""
-        # 使用 deque 固定容量缓存文件尾部行。
-        line_buf: deque[str] = deque(maxlen=max(1, int(max_lines)))
-        # 以 utf-8 打开文件，忽略异常字符避免解析中断。
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            # 顺序读取文件所有行。
-            for line in f:
-                # 保留尾部最近 max_lines 行并去掉换行符。
-                line_buf.append(line.rstrip("\n"))
-        # 返回尾部行列表。
-        return list(line_buf)
-
-    @staticmethod
-    def _parse_text_payload(raw_line: str) -> str | None:
-        """从日志原始行提取 text 字段（仅接受结构化 JSON 行）。"""
-        # 先标准化原始日志行文本。
-        raw = str(raw_line or "").strip()
-        # 空行直接返回空值。
-        if raw == "":
-            return None
-        # 尝试把日志行解析为 JSON 对象。
-        try:
-            # 解析 JSON 日志行。
-            obj = json.loads(raw)
-        except Exception:
-            # 非 JSON 行（如 traceback 纯文本）直接丢弃。
-            return None
-        # 仅接受对象结构。
-        if not isinstance(obj, dict):
-            return None
-        # 仅接受 log 包统一输出的 text 字段。
-        if "text" not in obj:
-            return None
-        # 返回 text 文本（可能为空，后续再过滤）。
-        return str(obj.get("text", "")).strip()
-
-    @staticmethod
-    def _extract_message_text(text_payload: str) -> str:
-        """从紧凑日志文本中抽取“消息正文”，去掉前缀并保留业务参数。"""
-        # 先标准化输入文本。
-        payload = str(text_payload or "").strip()
-        # 空文本直接返回空字符串。
-        if payload == "":
-            return ""
-
-        # 命中标准格式“... - 消息 | extra”时抽取消息段。
-        if " - " in payload:
-            # 截取 “-” 后面的消息部分。
-            payload = payload.split(" - ", 1)[1].strip()
-        # 把潜在多行文本压成单行，避免日志框换行抖动。
-        payload = " ".join(payload.splitlines()).strip()
-        # 返回最终可展示的消息正文。
-        return payload
-
-    @staticmethod
-    def _extract_sort_key(text_payload: str, fallback_index: int) -> str:
-        """提取日志排序键（优先时间前缀，失败时回退顺序索引）。"""
-        # 读取日志文本。
-        raw = str(text_payload or "")
-        # 粗判是否为时间前缀格式。
-        if len(raw) >= 23 and raw[4:5] == "-" and raw[7:8] == "-" and raw[10:11] == " ":
-            # 返回毫秒级时间前缀（字符串可直接比较大小）。
-            return raw[:23]
-        # 非标准行回退到输入顺序，保证排序稳定。
-        return f"zzzz-{int(fallback_index):09d}"
-
-    @staticmethod
-    def _extract_display_time(text_payload: str) -> str:
-        """从日志文本中提取展示时间（默认 HH:MM:SS.mmm）。"""
-        # 读取并标准化日志文本。
-        raw = str(text_payload or "").strip()
-        # 粗判是否包含时间前缀。
-        if len(raw) >= 23 and raw[4:5] == "-" and raw[7:8] == "-" and raw[10:11] == " ":
-            # 返回时间片段 HH:MM:SS.mmm。
-            return raw[11:23]
-        # 非标准格式返回占位时间。
-        return "--:--:--.---"
-
-    @staticmethod
-    def _is_task_open_settings_log(text_payload: str) -> bool:
-        """判断是否为 get_logger('task.open_settings') 产出的日志行。"""
-        # 读取原始 text 日志字符串。
-        payload = str(text_payload or "")
-        # 只认 component=task.open_settings。
-        return any(token in payload for token in OPEN_SETTINGS_COMPONENT_TOKENS)
-
-    def _load_latest_log_messages(self, limit: int = DEVICE_LOG_MAX_LINES) -> list[tuple[str, str]]:
-        """读取 log/json 下多文件日志并返回最新 N 条 (时间, 消息正文)。"""
-        # 日志目录路径对象。
-        log_dir = Path(JSON_LOG_DIR)
-        # 日志目录不存在时返回空列表。
-        if not log_dir.exists():
-            return []
-
-        # 收集 (排序键, 时间文本, 消息正文) 元组列表。
-        entries: list[tuple[str, str, str]] = []
-        # 非标准行排序回退计数器。
-        fallback_index = 0
-        # 收集日志目录内所有 jsonl 文件并按“最近修改时间倒序”排序。
-        all_paths: list[Path] = []
-        # 定义“安全读取文件修改时间”方法，避免日志轮转删除时抛异常。
-        def _safe_mtime(path: Path) -> float:
-            # 使用异常保护 stat 调用。
-            try:
-                # 返回文件最近修改时间戳。
-                return float(path.stat().st_mtime)
-            # 读取失败时回退 0，保证排序稳定。
-            except Exception:
-                return 0.0
-        # 遍历日志目录内的 jsonl 文件。
-        for path in log_dir.glob("*.jsonl"):
-            # 仅保留普通文件。
-            if path.is_file():
-                # 追加到候选列表。
-                all_paths.append(path)
-        # 按文件最近修改时间倒序排序，优先读取最新文件。
-        all_paths.sort(key=_safe_mtime, reverse=True)
-        # 仅取最近 N 个文件，避免历史日志过多导致每轮扫描过慢。
-        selected_paths = all_paths[:DEVICE_LOG_SCAN_MAX_FILES]
-
-        # 遍历选中的日志文件列表。
-        for path in selected_paths:
-            # 只处理普通文件，跳过目录或软链接异常项。
-            if not path.is_file():
-                continue
-            # 逐文件读取尾部日志行，单文件失败不影响整体展示。
-            try:
-                # 读取当前文件末尾若干行。
-                for line in self._tail_lines(path, DEVICE_LOG_TAIL_PER_FILE):
-                    # 解析为 text 日志字符串。
-                    payload = self._parse_text_payload(line)
-                    # 非结构化 JSON 日志行直接跳过（例如 traceback 原文）。
-                    if payload is None:
-                        continue
-                    # 仅保留 get_logger('task.open_settings') 输出日志。
-                    if not self._is_task_open_settings_log(payload):
-                        continue
-                    # 提取消息正文。
-                    message = self._extract_message_text(payload)
-                    # 空正文跳过，避免日志框出现空行。
-                    if message == "":
-                        continue
-                    # 计算排序键。
-                    sort_key = self._extract_sort_key(payload, fallback_index)
-                    # 提取日志展示时间文本。
-                    display_time = self._extract_display_time(payload)
-                    # 追加一条可展示日志记录。
-                    entries.append((sort_key, display_time, message))
-                    # 增加回退计数器，保证排序键唯一性。
-                    fallback_index += 1
-            # 单文件读取失败时记录警告并继续其它文件。
-            except Exception:
-                log.warning("读取日志文件失败", path=str(path))
-
-        # 按时间（或回退序）升序排序。
-        entries.sort(key=lambda item: item[0])
-        # 返回最后 N 条时间+消息。
-        return [(display_time, message) for _, display_time, message in entries[-max(1, int(limit)) :]]
-
-    def _refresh_logs_view(self) -> None:
-        """刷新设备页日志框显示内容。"""
-        # 日志容器尚未初始化时直接返回。
-        if not self.log_list_column:
-            return
-        # 读取最新日志时间+消息列表。
-        records = self._load_latest_log_messages(limit=DEVICE_LOG_MAX_LINES)
-        # 渲染日志记录到日志面板。
-        self._render_logs_records(records)
-
-    async def _refresh_logs_view_async(self, update_page: bool = False) -> None:
-        """在线程池中读取日志列表，避免同步扫盘阻塞 GUI。"""
-        # 日志容器尚未初始化时直接返回。
-        if not self.log_list_column:
-            return
-        try:
-            # 在线程池中读取最新日志记录，避免主线程直接扫描日志文件。
-            records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
-            # 回填日志缓存，便于自动刷新节流直接复用。
-            self._cached_log_records = list(records)
-            # 更新最近一次日志读取时间，避免后续自动刷新马上再次扫盘。
-            self._last_log_load_mono_ts = time.monotonic()
-            # 把日志记录渲染到界面。
-            self._render_logs_records(records)
-            # 需要时提交一次页面刷新，确保初始日志尽快可见。
-            if update_page:
-                self.page.update()
-        except Exception:
-            # 记录异步日志加载异常，避免用户误以为日志面板空白就是没有日志。
-            log.exception("异步刷新设备日志视图失败")
-
     def _render_logs_records(self, records: list[tuple[str, str]]) -> None:
         """把日志记录渲染到日志面板。"""
         # 日志容器尚未初始化时直接返回。
-        if not self.log_list_column:
+        if not self.log_list_view:
             return
         # 缓存可复制文本（带时间）。
         self._latest_log_messages = [f"{display_time} | {message}" for display_time, message in records]
@@ -896,10 +648,10 @@ class DeviceTab:
         # 无日志时展示占位文本。
         if not records:
             # 黑底场景使用白字提示文案，并允许选中复制。
-            self.log_list_column.controls = [ft.Text("暂无 open_settings 日志。", size=12, color=ft.Colors.WHITE70, selectable=True)]
+            self.log_list_view.controls = [ft.Text("暂无 open_settings 日志。", size=12, color=ft.Colors.WHITE70, selectable=True)]
             return
         # 把每条日志渲染成“时间 + 内容”两列，提升可读性。
-        self.log_list_column.controls = [
+        self.log_list_view.controls = [
             ft.Container(
                 # 每条日志增加内边距，避免文本拥挤。
                 padding=ft.padding.symmetric(horizontal=8, vertical=4),
@@ -927,21 +679,33 @@ class DeviceTab:
             )
             for idx, (display_time, message) in enumerate(records)
         ]
-        # 仅在“跟随最新”状态时自动滚到底部。
-        if self._logs_follow_latest:
-            try:
-                # 直接定位到最底部，默认展示最新日志。
-                self.log_list_column.scroll_to(offset=-1, duration=0)
-            except Exception:
-                # 某些平台初次布局前滚动可能失败，这里静默忽略即可。
-                pass
+
+    async def _scroll_logs_to_latest_async(self) -> None:
+        """在刷新完成后显式滚到最后一条日志。"""
+        # 不跟随最新或控件未初始化时直接跳过。
+        if not self._logs_follow_latest or not self.log_list_view:
+            return
+        try:
+            # 先让 Flet 完成一次布局，再执行滚动。
+            await asyncio.sleep(0)
+            # 显式滚到末尾，修复刷新后仍停留在旧位置的问题。
+            self.log_list_view.scroll_to(offset=-1, duration=0)
+            # 提交滚动指令。
+            self.page.update()
+        except Exception:
+            # 滚动失败只记调试日志，避免影响主刷新流程。
+            log.debug("设备日志滚动到最新失败")
 
     def _on_log_scroll(self, e: ft.OnScrollEvent) -> None:
         """根据滚动位置决定是否继续跟随最新日志。"""
         # 计算当前位置距离底部的像素。
         distance_to_bottom = max(0.0, float(e.max_scroll_extent) - float(e.pixels))
         # 离底部 24px 内视为“跟随最新”，否则视为查看历史。
-        self._logs_follow_latest = distance_to_bottom <= 24.0
+        follow_latest = distance_to_bottom <= 24.0
+        # 同步保存本地跟随状态。
+        self._logs_follow_latest = follow_latest
+        # 把跟随状态同步给协调器，便于刷新日志打点时输出上下文。
+        self._coordinator.mark_log_follow_latest(follow_latest)
 
     def _handle_copy_logs(self, _e: ft.ControlEvent) -> None:
         """点击复制按钮时，异步把当前日志写入系统剪贴板。"""
@@ -967,68 +731,15 @@ class DeviceTab:
             # 给用户返回可读错误提示。
             self._show_snack("清空日志失败，请稍后重试。")
 
-    def _clear_open_settings_logs(self) -> int:
-        """清空 log/json 目录下 component=task.open_settings 对应日志行。"""
-        # 日志目录路径对象。
-        log_dir = Path(JSON_LOG_DIR)
-        # 目录不存在时直接返回 0。
-        if not log_dir.exists():
-            return 0
-
-        # 统计被清理的日志条数。
-        cleared_count = 0
-        # 遍历所有 jsonl 日志文件。
-        for path in sorted(log_dir.glob("*.jsonl")):
-            # 跳过非普通文件。
-            if not path.is_file():
-                continue
-            try:
-                # 保存保留行（非 open_settings 日志）。
-                kept_lines: list[str] = []
-                # 读取原文件全部行。
-                with path.open("r", encoding="utf-8", errors="ignore") as f:
-                    # 按行处理日志内容。
-                    for raw_line in f:
-                        # 去掉换行，便于统一处理。
-                        line = raw_line.rstrip("\n")
-                        # 尝试解析结构化日志 text。
-                        payload = self._parse_text_payload(line)
-                        # 命中 open_settings 日志则清理。
-                        if payload is not None and self._is_task_open_settings_log(payload):
-                            # 增加清理计数。
-                            cleared_count += 1
-                            # 不写回该行，实现清空。
-                            continue
-                        # 非目标日志原样保留。
-                        kept_lines.append(line)
-                # 回写保留行到原文件。
-                with path.open("w", encoding="utf-8") as f:
-                    # 逐行写回，保持 JSONL 结构。
-                    for line in kept_lines:
-                        # 每行补回换行符。
-                        f.write(f"{line}\n")
-            except Exception:
-                log.exception("清空日志文件失败", path=str(path))
-        # 清空缓存，避免复制按钮复制旧数据。
-        self._latest_log_messages = []
-        # 清空日志缓存记录，避免自动刷新继续展示旧数据。
-        self._cached_log_records = []
-        # 重置最近一次日志读取时间，确保下次刷新会重新扫盘。
-        self._last_log_load_mono_ts = 0.0
-        # 返回总清空条数给 UI 展示。
-        return cleared_count
-
     async def _clear_logs_async(self) -> None:
-        """在线程池中清空日志并回填最新视图，避免同步文件改写阻塞 GUI。"""
+        """通过协调器清空日志并回放最新快照。"""
         try:
-            # 在线程池中执行日志清空动作，避免阻塞 Flet 事件线程。
-            cleared_count = await asyncio.to_thread(self._clear_open_settings_logs)
-            # 清空后在线程池中重新读取最新日志，保持面板状态一致。
-            records = await asyncio.to_thread(self._load_latest_log_messages, DEVICE_LOG_MAX_LINES)
-            # 把清空后的记录渲染到日志面板。
-            self._render_logs_records(records)
-            # 提交界面刷新，确保日志列表立即变化。
-            self.page.update()
+            # 通过协调器独立串行线程清空日志，避免 DeviceTab 直接触盘。
+            cleared_count = await self._coordinator.clear_logs()
+            # 清空后强制请求新快照，保证面板与磁盘状态一致。
+            snapshot = await self._coordinator.request_refresh(source="clear_logs", force_refresh=True)
+            # 把清空后的快照回填到设备页。
+            self.apply_snapshot(snapshot=snapshot, source="clear_logs", show_toast=False)
             # 反馈清空结果。
             self._show_snack(f"已清空 {cleared_count} 条日志。")
         except Exception:

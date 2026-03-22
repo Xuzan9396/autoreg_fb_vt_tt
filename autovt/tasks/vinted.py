@@ -515,7 +515,7 @@ class VintedTask(OpenSettingsTask):
         if not self.poco_find_or_click(
             nodes=[poco(VINTED_SHOW_REGISTRATION_OPTIONS_BUTTON_ID)],
             desc="Vinted-注册入口按钮",
-            sleep_interval=10,
+            sleep_interval=70,
         ):
             # 注册入口未命中时记录失败并返回。
             return self._vinted_fail("Vinted 注册失败：未找到注册入口按钮")
@@ -688,6 +688,7 @@ class VintedTask(OpenSettingsTask):
                         status_field="vinted_status",
                         success_status_value=1,
                         failure_status_value=2,
+                        increment_vt_fail_num=True,
                         log_label="Vinted",
                     )
             # 关闭任务内数据库连接，避免每轮 run_once 产生连接堆积。

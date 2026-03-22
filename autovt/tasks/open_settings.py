@@ -2164,6 +2164,7 @@ class OpenSettingsTask:
         success_status_value: int = 1,
         failure_status_value: int = 0,
         increment_fb_fail_num: bool = False,
+        increment_vt_fail_num: bool = False,
         log_label: str = "任务",
     ) -> None:
         # 邮箱为空时无法按账号更新，直接记录错误并返回。
@@ -2178,6 +2179,8 @@ class OpenSettingsTask:
         target_register_status = int(success_status_value if success else failure_status_value)
         # 失败且调用方要求时才累加 Facebook 失败次数。
         should_increment_fb_fail_num = bool((not success) and increment_fb_fail_num)
+        # 失败且调用方要求时才累加 Vinted 失败次数。
+        should_increment_vt_fail_num = bool((not success) and increment_vt_fail_num)
         # 成功时清空 msg，失败时写入具体错误原因。
         target_msg = "" if success else str(reason or f"{log_label}失败：未知原因").strip()
         # 控制 msg 长度，避免写入过长异常字符串。
@@ -2210,6 +2213,8 @@ class OpenSettingsTask:
                 msg=target_msg,
                 # 失败时原子累加 Facebook 失败次数，成功时保持原值。
                 increment_fb_fail_num=should_increment_fb_fail_num,
+                # 失败时原子累加 Vinted 失败次数，成功时保持原值。
+                increment_vt_fail_num=should_increment_vt_fail_num,
                 # 透传当前任务对应的注册状态字段更新参数。
                 **update_kwargs,
             )
@@ -2221,6 +2226,7 @@ class OpenSettingsTask:
                 status_field=status_field,
                 register_status=target_register_status,
                 increment_fb_fail_num=should_increment_fb_fail_num,
+                increment_vt_fail_num=should_increment_vt_fail_num,
                 msg=target_msg,
                 affected_rows=affected_rows,
             )
@@ -2234,6 +2240,7 @@ class OpenSettingsTask:
                 status_field=status_field,
                 register_status=target_register_status,
                 increment_fb_fail_num=should_increment_fb_fail_num,
+                increment_vt_fail_num=should_increment_vt_fail_num,
                 msg=target_msg,
                 error=str(exc),
             )

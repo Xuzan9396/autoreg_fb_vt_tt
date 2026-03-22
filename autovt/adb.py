@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -18,6 +19,14 @@ _RESOLVED_ADB_BIN: str | None = None
 ADB_DEVICES_TIMEOUT_SEC = 6
 # 定义 adb 恢复命令超时时间（秒）。
 ADB_RECOVER_TIMEOUT_SEC = 4
+# adb 在线设备列表缓存 TTL（秒）。
+ADB_ONLINE_SERIALS_CACHE_TTL_SEC = 2.5
+# 缓存最近一次在线设备结果，减少 GUI 高频刷新时重复执行 adb devices。
+_ADB_ONLINE_SERIALS_CACHE: list[str] = []
+# 缓存最近一次在线设备结果的更新时间戳。
+_ADB_ONLINE_SERIALS_CACHE_AT = 0.0
+# 为在线设备缓存准备线程锁，保证多线程场景读写一致。
+_ADB_ONLINE_SERIALS_CACHE_LOCK = threading.RLock()
 
 
 def _adb_executable_name() -> str:
@@ -343,8 +352,48 @@ def _run_adb_devices(adb_bin: str, server_args: list[str]) -> subprocess.Complet
     )
 
 
-def list_online_serials() -> list[str]:
+def _get_cached_online_serials() -> tuple[list[str], int]:
+    """读取当前在线设备缓存和年龄。"""
+    # 使用缓存锁保护读操作。
+    with _ADB_ONLINE_SERIALS_CACHE_LOCK:
+        # 缓存未建立时直接返回空结果。
+        if _ADB_ONLINE_SERIALS_CACHE_AT <= 0:
+            return [], -1
+        # 计算当前缓存年龄。
+        snapshot_age_ms = int(max(0.0, time.time() - _ADB_ONLINE_SERIALS_CACHE_AT) * 1000)
+        # 返回缓存副本和年龄，避免调用方误改内部列表。
+        return list(_ADB_ONLINE_SERIALS_CACHE), snapshot_age_ms
+
+
+def _store_cached_online_serials(serials: list[str]) -> None:
+    """回写在线设备缓存。"""
+    global _ADB_ONLINE_SERIALS_CACHE_AT
+    # 使用缓存锁保护写操作。
+    with _ADB_ONLINE_SERIALS_CACHE_LOCK:
+        # 保存最新缓存副本。
+        _ADB_ONLINE_SERIALS_CACHE[:] = list(serials)
+        # 记录缓存时间戳。
+        _ADB_ONLINE_SERIALS_CACHE_AT = time.time()
+
+
+def list_online_serials(force_refresh: bool = False, source: str = "") -> list[str]:
     """读取 adb 在线设备 serial 列表。"""
+    # 统一标准化调用来源，便于缓存和耗时日志区分上下文。
+    caller_source = str(source or "").strip() or "unknown"
+    # 非强制刷新场景优先命中短 TTL 缓存，避免高频刷新反复执行 adb devices。
+    if not force_refresh:
+        cached_serials, snapshot_age_ms = _get_cached_online_serials()
+        if snapshot_age_ms >= 0 and snapshot_age_ms <= int(ADB_ONLINE_SERIALS_CACHE_TTL_SEC * 1000):
+            log.debug(
+                "读取在线设备命中缓存",
+                source=caller_source,
+                cache_hit=True,
+                snapshot_age_ms=snapshot_age_ms,
+                ttl_ms=int(ADB_ONLINE_SERIALS_CACHE_TTL_SEC * 1000),
+                online_count=len(cached_serials),
+            )
+            return cached_serials
+
     # 记录本次读取在线设备总起点，用于输出完整耗时。
     started_at = time.monotonic()
     # 初始化首轮 adb devices 耗时（毫秒）。
@@ -367,7 +416,12 @@ def list_online_serials() -> list[str]:
         # 计算首轮 adb devices 耗时。
         first_try_elapsed_ms = int((time.monotonic() - first_try_started_at) * 1000)
         # 记录执行成功调试日志。
-        log.debug("执行 adb devices 成功", server_addr=ADB_SERVER_ADDR, first_try_elapsed_ms=first_try_elapsed_ms)
+        log.debug(
+            "执行 adb devices 成功",
+            server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
+            first_try_elapsed_ms=first_try_elapsed_ms,
+        )
     except FileNotFoundError as exc:
         # 机器上没装 adb 或 PATH 里找不到 adb 时，给出清晰报错。
         log.exception("未找到 adb 命令")
@@ -380,6 +434,7 @@ def list_online_serials() -> list[str]:
         log.error(
             "adb devices 超时，尝试恢复 adb server",
             server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
             timeout_sec=ADB_DEVICES_TIMEOUT_SEC,
             first_try_elapsed_ms=first_try_elapsed_ms,
             error=str(exc),
@@ -404,6 +459,7 @@ def list_online_serials() -> list[str]:
             log.info(
                 "adb devices 重试成功",
                 server_addr=ADB_SERVER_ADDR,
+                source=caller_source,
                 recover_elapsed_ms=recover_elapsed_ms,
                 retry_elapsed_ms=retry_elapsed_ms,
             )
@@ -413,6 +469,7 @@ def list_online_serials() -> list[str]:
             log.error(
                 "adb devices 重试失败，按无设备处理",
                 server_addr=ADB_SERVER_ADDR,
+                source=caller_source,
                 recover_elapsed_ms=recover_elapsed_ms,
                 retry_elapsed_ms=retry_elapsed_ms,
                 error=str(retry_exc),
@@ -424,6 +481,7 @@ def list_online_serials() -> list[str]:
         log.error(
             "adb devices 执行失败，尝试恢复 adb server",
             server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
             returncode=int(getattr(exc, "returncode", -1)),
             stderr=str(getattr(exc, "stderr", "")).strip(),
             stdout=str(getattr(exc, "stdout", "")).strip(),
@@ -448,6 +506,7 @@ def list_online_serials() -> list[str]:
             log.info(
                 "adb devices 恢复后成功",
                 server_addr=ADB_SERVER_ADDR,
+                source=caller_source,
                 recover_elapsed_ms=recover_elapsed_ms,
                 retry_elapsed_ms=retry_elapsed_ms,
             )
@@ -457,6 +516,7 @@ def list_online_serials() -> list[str]:
             log.error(
                 "adb devices 恢复后仍失败，按无设备处理",
                 server_addr=ADB_SERVER_ADDR,
+                source=caller_source,
                 recover_elapsed_ms=recover_elapsed_ms,
                 retry_elapsed_ms=retry_elapsed_ms,
                 error=str(retry_exc),
@@ -468,6 +528,7 @@ def list_online_serials() -> list[str]:
         log.error(
             "adb devices 未知异常，按无设备处理",
             server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
             first_try_elapsed_ms=first_try_elapsed_ms,
             recover_elapsed_ms=recover_elapsed_ms,
             retry_elapsed_ms=retry_elapsed_ms,
@@ -501,6 +562,10 @@ def list_online_serials() -> list[str]:
 
     # 计算解析输出阶段耗时。
     parse_elapsed_ms = int((time.monotonic() - parse_started_at) * 1000)
+    # 成功读取后刷新在线设备缓存。
+    _store_cached_online_serials(serials)
+    # 读取最新缓存年龄，方便统一输出诊断字段。
+    _, snapshot_age_ms = _get_cached_online_serials()
     # 计算本次读取在线设备总耗时。
     total_elapsed_ms = int((time.monotonic() - started_at) * 1000)
     # 总耗时较长时记录告警，便于定位是否是定时刷新导致卡顿。
@@ -508,11 +573,15 @@ def list_online_serials() -> list[str]:
         log.warning(
             "读取在线设备耗时较长",
             server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
             total_elapsed_ms=total_elapsed_ms,
             first_try_elapsed_ms=first_try_elapsed_ms,
             recover_elapsed_ms=recover_elapsed_ms,
             retry_elapsed_ms=retry_elapsed_ms,
             parse_elapsed_ms=parse_elapsed_ms,
+            cache_hit=False,
+            snapshot_age_ms=snapshot_age_ms,
+            force_refresh=force_refresh,
             recovered=recovered,
             online_count=len(serials),
         )
@@ -521,11 +590,15 @@ def list_online_serials() -> list[str]:
         log.debug(
             "读取在线设备完成",
             server_addr=ADB_SERVER_ADDR,
+            source=caller_source,
             total_elapsed_ms=total_elapsed_ms,
             first_try_elapsed_ms=first_try_elapsed_ms,
             recover_elapsed_ms=recover_elapsed_ms,
             retry_elapsed_ms=retry_elapsed_ms,
             parse_elapsed_ms=parse_elapsed_ms,
+            cache_hit=False,
+            snapshot_age_ms=snapshot_age_ms,
+            force_refresh=force_refresh,
             recovered=recovered,
             online_count=len(serials),
         )
